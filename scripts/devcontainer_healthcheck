@@ -1,0 +1,62 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+SUPERVISOR_LOG="/tmp/supervisor_run.log"
+MOUNT_BASE="/mnt/supervisor/homeassistant/custom_components"
+INTEGRATION_DIR="${MOUNT_BASE}/grid_coordinator"
+
+failures=0
+
+pass() {
+  printf '[PASS] %s\n' "$1"
+}
+
+fail() {
+  printf '[FAIL] %s\n' "$1"
+  failures=$((failures + 1))
+}
+
+echo "[healthcheck] Checking Home Assistant supervisor state..."
+if command -v supervisor_run >/dev/null 2>&1; then
+  pass "supervisor_run command is available"
+else
+  fail "supervisor_run command is missing (wrong image or failed container build)"
+fi
+
+if pgrep -f supervisor_run >/dev/null 2>&1; then
+  pass "Home Assistant supervisor process is running"
+else
+  fail "Home Assistant supervisor process is not running"
+fi
+
+echo "[healthcheck] Checking integration mount..."
+if [[ -d "${MOUNT_BASE}" ]]; then
+  pass "custom_components mount point exists"
+else
+  fail "custom_components mount point is missing at ${MOUNT_BASE}"
+fi
+
+if [[ -d "${INTEGRATION_DIR}" ]]; then
+  pass "grid_coordinator directory is mounted"
+else
+  fail "grid_coordinator is not mounted at ${INTEGRATION_DIR}"
+fi
+
+if [[ -f "${INTEGRATION_DIR}/manifest.json" ]]; then
+  pass "integration manifest is present"
+else
+  fail "integration manifest missing from mounted directory"
+fi
+
+if [[ "${failures}" -eq 0 ]]; then
+  echo "[healthcheck] All checks passed."
+  exit 0
+fi
+
+echo "[healthcheck] ${failures} check(s) failed."
+if [[ -f "${SUPERVISOR_LOG}" ]]; then
+  echo "[healthcheck] Last 40 lines from ${SUPERVISOR_LOG}:"
+  tail -n 40 "${SUPERVISOR_LOG}"
+fi
+
+exit 1

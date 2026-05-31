@@ -1,0 +1,47 @@
+{
+    "name": "grid_coordinator Development",
+    "image": "ghcr.io/home-assistant/devcontainer:addons",
+    "appPort": [
+        "7123:8123",
+        "7357:4357"
+    ],
+    "postStartCommand": "bash devcontainer_bootstrap",
+    "runArgs": [
+        "-e",
+        "GIT_EDITOR=code --wait",
+        "--privileged"
+    ],
+    "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
+    "workspaceMount": "source=${localWorkspaceFolder},target=${containerWorkspaceFolder},type=bind,consistency=cached",
+    "containerEnv": {
+        "WORKSPACE_DIRECTORY": "${containerWorkspaceFolder}"
+    },
+    "mounts": [
+        "type=volume,target=/var/lib/docker",
+        "type=volume,target=/mnt/supervisor",
+        "source=${localWorkspaceFolder}/custom_components,target=/mnt/supervisor/homeassistant/custom_components,type=bind,consistency=cached"
+    ],
+    "customizations": {
+        "vscode": {
+            "extensions": [
+                "charliermarsh.ruff",
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "timonwong.shellcheck"
+            ],
+            "settings": {
+                "files.eol": "\n",
+                "editor.tabSize": 4,
+                "editor.formatOnPaste": true,
+                "editor.formatOnSave": true,
+                "editor.formatOnType": false,
+                "files.trimTrailingWhitespace": true,
+                "python.analysis.typeCheckingMode": "basic",
+                "python.analysis.autoImportCompletions": true,
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff"
+                }
+            }
+        }
+    }
+}

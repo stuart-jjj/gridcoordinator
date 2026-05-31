@@ -1,0 +1,15 @@
+1. Settings → Helpers — you should see all the input_number sliders and the input_boolean appear automatically from
+  YAML (no need to create them manually).
+  2. Toggle input_boolean.emhass_control_active to ON — this exits the disabled gate.
+  3. The coordinator should immediately start running and the Mode sensor should change from disabled.
+
+  Testing workflow:
+  - Slide Stub Grid Power to simulate grid import/export (e.g. +2000 W = importing 2 kW)
+  - Slide Stub MPC Grid Power to simulate EMHASS setpoints (note: sign-inverted by default, so -500 = target 500 W
+  import)
+  - Watch Voltx Command and Mode sensors update every 10 seconds
+  - Stub Voltx CMD Mirror shows what the coordinator is writing to the inverter
+
+  The number.soc_min and number.soc_max stubs have hardcoded states (20/95) — to make them adjustable you'd need
+  backing input_number stores too, but the defaults are fine for initial testing.
+  

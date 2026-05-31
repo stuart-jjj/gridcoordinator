@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+supervisor_run &
+supervisor_pid=$!
+
+cleanup() {
+  if kill -0 "${supervisor_pid}" >/dev/null 2>&1; then
+    kill "${supervisor_pid}" >/dev/null 2>&1 || true
+  fi
+}
+
+trap cleanup INT TERM
+
+if command -v ha >/dev/null 2>&1; then
+  for _ in $(seq 1 60); do
+    if ha supervisor info >/dev/null 2>&1; then
+      echo "[devcontainer] Setting supervisor logging to info with debug disabled..."
+      ha supervisor options --logging info --debug=false || true
+      break
+    fi
+
+    if ! kill -0 "${supervisor_pid}" >/dev/null 2>&1; then
+      break
+    fi
+
+    sleep 1
+  done
+fi
+
+wait "${supervisor_pid}"

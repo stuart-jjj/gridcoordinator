@@ -1,0 +1,162 @@
+# https://www.home-assistant.io/integrations/homeassistant/
+homeassistant:
+  debug: false
+
+# https://www.home-assistant.io/integrations/logger/
+logger:
+  default: info
+  logs:
+    custom_components.grid_coordinator: debug
+
+# Minimal platform set needed for development — no default_config to avoid
+# optional HA component dependencies (numpy, ffmpeg, etc.) not in requirements.txt
+http:
+frontend:
+
+# ── Dev stubs — simulate real hardware/EMHASS entities ────────────────────────
+
+input_boolean:
+  emhass_control_active:
+    name: "EMHASS Control Active"
+
+input_number:
+  # Backing stores for template sensors — adjust in UI to simulate conditions
+  stub_grid_power:
+    name: "Stub Grid Power"
+    min: -15000
+    max: 15000
+    step: 50
+    unit_of_measurement: W
+  stub_mpc_grid_power:
+    name: "Stub MPC Grid Power"
+    min: -15000
+    max: 15000
+    step: 50
+    unit_of_measurement: W
+  stub_battery_soc:
+    name: "Stub Battery SOC"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    initial: 50
+  stub_voltx_cmd_mirror:
+    name: "Stub Voltx CMD Mirror"
+    min: -10000
+    max: 10000
+    step: 1
+    unit_of_measurement: W
+  voltx_battery_max_charging_limit:
+    name: "Voltx Battery Max Charging Limit"
+    min: 0
+    max: 10000
+    step: 100
+    unit_of_measurement: W
+    initial: 5000
+  voltx_battery_max_discharging_limit:
+    name: "Voltx Battery Max Discharging Limit"
+    min: 0
+    max: 10000
+    step: 100
+    unit_of_measurement: W
+    initial: 5000
+  stub_soc_min:
+    name: "Stub SOC Min"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    initial: 20
+  stub_soc_max:
+    name: "Stub SOC Max"
+    min: 0
+    max: 100
+    step: 1
+    unit_of_measurement: "%"
+    initial: 95
+
+input_select:
+  stub_voltx_work_mode:
+    name: "Stub Voltx Work Mode"
+    options:
+      - General
+      - Custom
+      - EPS
+    initial: General
+
+template:
+  - sensor:
+      - name: "IAMMeter Power A"
+        unique_id: stub_iammeter_power_a
+        state: "{{ states('input_number.stub_grid_power') | float(0) }}"
+        unit_of_measurement: W
+        state_class: measurement
+        device_class: power
+
+      - name: "MPC Grid Power"
+        unique_id: stub_mpc_grid_power
+        state: "{{ states('input_number.stub_mpc_grid_power') | float(0) }}"
+        unit_of_measurement: W
+        state_class: measurement
+        device_class: power
+
+      - name: "Battery State Of Charge"
+        unique_id: stub_battery_soc
+        state: "{{ states('input_number.stub_battery_soc') | float(50) }}"
+        unit_of_measurement: "%"
+        state_class: measurement
+        device_class: battery
+
+  - number:
+      - name: "Voltx Battery Battery Charge Discharge Power"
+        unique_id: stub_voltx_battery_charge_discharge_power
+        min: -10000
+        max: 10000
+        step: 1
+        unit_of_measurement: W
+        state: "{{ states('input_number.stub_voltx_cmd_mirror') | float(0) }}"
+        set_value:
+          - action: input_number.set_value
+            data:
+              entity_id: input_number.stub_voltx_cmd_mirror
+              value: "{{ value }}"
+
+      - name: "SOC Min"
+        unique_id: stub_soc_min
+        min: 0
+        max: 100
+        step: 1
+        unit_of_measurement: "%"
+        state: "{{ states('input_number.stub_soc_min') | float(20) }}"
+        set_value:
+          - action: input_number.set_value
+            data:
+              entity_id: input_number.stub_soc_min
+              value: "{{ value }}"
+
+      - name: "SOC Max"
+        unique_id: stub_soc_max
+        min: 0
+        max: 100
+        step: 1
+        unit_of_measurement: "%"
+        state: "{{ states('input_number.stub_soc_max') | float(95) }}"
+        set_value:
+          - action: input_number.set_value
+            data:
+              entity_id: input_number.stub_soc_max
+              value: "{{ value }}"
+
+  - select:
+      - name: "Voltx Inverter Work Mode"
+        unique_id: stub_voltx_inverter_work_mode
+        state: "{{ states('input_select.stub_voltx_work_mode') }}"
+        options:
+          - General
+          - Custom
+          - EPS
+        select_option:
+          - action: input_select.select_option
+            data:
+              entity_id: input_select.stub_voltx_work_mode
+              option: "{{ option }}"
