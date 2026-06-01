@@ -1,46 +1,88 @@
-# Notice
+# Grid Coordinator
 
-The component and platforms in this repository are not meant to be used by a
-user, but as a "blueprint" that custom component developers can build
-upon, to make more awesome stuff.
+Grid Coordinator is a Home Assistant custom integration that runs a 10-second
+control loop to steer a Voltx battery inverter so household grid import/export
+tracks an EMHASS MPC setpoint.
 
-HAVE FUN! 😎
+## What it does
 
-## Why?
+- Reads live grid power and EMHASS target power.
+- Normalizes sign conventions so control logic always uses:
+	- positive = importing from grid
+	- negative = exporting to grid
+- Computes battery charge/discharge command with safety constraints:
+	- SOC limits
+	- inverter max charge/discharge limits
+	- ramp limiting per control tick
+	- hard grid import/export limits
+- Writes setpoints to Voltx entities in Home Assistant.
+- Exposes diagnostic sensors via coordinator data.
 
-This is simple, by having custom_components look (README + structure) the same
-it is easier for developers to help each other and for users to start using them.
+## Core behavior
 
-If you are a developer and you want to add things to this "blueprint" that you think more
-developers will have use for, please open a PR to add it :)
+- Update cadence: every 10 seconds.
+- If the integration enable entity is off, the coordinator stops active tracking
+	and leaves inverter behavior in self-consumption mode.
+- If the EMHASS plan is stale, the controller falls back to a safe behavior.
+- Around near-zero target, a self-consumption deadband avoids unnecessary
+	command chatter.
 
-## What?
+## Manual override service
 
-This repository contains multiple files, here is a overview:
+The integration provides `grid_coordinator.set_mode` to temporarily override
+normal EMHASS tracking.
 
-File | Purpose | Documentation
--- | -- | --
-`.devcontainer.json` | Used for development/testing with Visual Studio Code. | [Documentation](https://code.visualstudio.com/docs/remote/containers)
-`.github/ISSUE_TEMPLATE/*.yml` | Templates for the issue tracker | [Documentation](https://help.github.com/en/github/building-a-strong-community/configuring-issue-templates-for-your-repository)
-`custom_components/integration_blueprint/*` | Integration files, this is where everything happens. | [Documentation](https://developers.home-assistant.io/docs/creating_component_index)
-`CONTRIBUTING.md` | Guidelines on how to contribute. | [Documentation](https://help.github.com/en/github/building-a-strong-community/setting-guidelines-for-repository-contributors)
-`LICENSE` | The license file for the project. | [Documentation](https://help.github.com/en/github/creating-cloning-and-archiving-repositories/licensing-a-repository)
-`README.md` | The file you are reading now, should contain info about the integration, installation and configuration instructions. | [Documentation](https://help.github.com/en/github/writing-on-github/basic-writing-and-formatting-syntax)
-`requirements.txt` | Python packages used for development/lint/testing this integration. | [Documentation](https://pip.pypa.io/en/stable/user_guide/#requirements-files)
+Supported modes:
+- `auto`: cancel override and resume EMHASS tracking
+- `self_consume`: force inverter self-consumption behavior
+- `hold_soc`: hold battery around 0W charge/discharge
+- `force_charge`: force charging (optionally with `power_w`)
+- `force_export`: force discharge/export (optionally with `power_w`)
+- `disabled`: stop coordinator writes to inverter
 
-## How?
+Common fields:
+- `power_w` (optional for force modes)
+- `duration_minutes` (default 60)
+- `bypass_soc` (optional, force modes only)
 
-1. Create a new repository in GitHub, using this repository as a template by clicking the "Use this template" button in the GitHub UI.
-1. Open your new repository in Visual Studio Code devcontainer (Preferably with the "`Dev Containers: Clone Repository in Named Container Volume...`" option).
-1. Rename all instances of the `integration_blueprint` to `custom_components/<your_integration_domain>` (e.g. `custom_components/awesome_integration`).
-1. Rename all instances of the `Integration Blueprint` to `<Your Integration Name>` (e.g. `Awesome Integration`).
-1. Run the `scripts/develop` to start HA and test out your new integration.
+## Configuration
 
-## Next steps
+Configured from the UI config flow and options flow.
 
-These are some next steps you may want to look into:
-- Add tests to your integration, [`pytest-homeassistant-custom-component`](https://github.com/MatthewFlamm/pytest-homeassistant-custom-component) can help you get started.
-- Add brand images (logo/icon).
-- Create your first release.
-- Share your integration on the [Home Assistant Forum](https://community.home-assistant.io/).
-- Submit your integration to [HACS](https://hacs.xyz/docs/publish/start).
+Main controller options include:
+- import limit (W)
+- export limit (W)
+- ramp step (W per tick)
+- plan stale timeout (minutes)
+- MPC sign inversion toggle
+- self-consumption mode name
+- self-consumption deadband (W)
+- tracking deadband (W)
+- testing mode toggle
+
+Entity IDs are configurable for all required inputs and outputs, including grid
+power, MPC target, battery SOC/limits, enable gate, inverter command entity,
+and inverter work mode entity.
+
+## Installation
+
+Install as a custom integration in Home Assistant, then add Grid Coordinator
+from Settings > Devices & Services.
+
+If you are developing this repo locally, see [CLAUDE.md](CLAUDE.md) for
+devcontainer-specific setup and runtime notes.
+
+## Development
+
+Run inside the devcontainer:
+
+```bash
+scripts/setup
+scripts/develop
+scripts/lint
+```
+
+Notes:
+- Python source changes require a full Home Assistant restart.
+- Config/options and translation changes can be picked up with integration
+	reload.

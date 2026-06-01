@@ -13,3 +13,84 @@
   The number.soc_min and number.soc_max stubs have hardcoded states (20/95) — to make them adjustable you'd need
   backing input_number stores too, but the defaults are fine for initial testing.
   
+  
+   Here are five test cases, ordered from simplest to more diagnostic:
+
+  ---
+  Test 1 — Zero-error stability (already passing)
+
+  Current state is the test. Grid Power = Grid Target = 2000 W, error = 0.
+
+  Watch: Voltx Command should hold steady at 3500 W. If it drifts each tick the integrator has a bug.
+
+  ---
+  Test 2 — EMHASS setpoint change
+
+  Do: Change Sim MPC Grid Power from 2000 → 0 W.
+
+  Expect:
+  - Grid Target sensor immediately drops to 0 W
+  - Error is now +2000 W (importing 2000 more than target)
+  - Voltx Command ticks up by 1500 W every 10 s (ramp limit): 3500 → 5000 (capped at max discharge)
+  - Mode stays emhass_tracking
+  - Import Headroom stays at 10 000 W (grid power unchanged — in the sim, you're controlling both sides independently)
+
+  What it verifies: EMHASS setpoint is read and sign-corrected; the integrating controller accumulates error
+  correctly.
+
+  ---
+  Test 3 — Enable/disable gate
+
+  Do: Toggle Sim Enabled OFF.
+
+  Expect:
+  - Mode immediately becomes disabled
+  - Voltx Command sensor freezes at its current value (no new commands written to the inverter)
+  - Activity log stops showing new Battery Command changes
+
+  Toggle it back ON — tracking resumes from the current command.
+
+  What it verifies: The guard gate works; the coordinator doesn't touch the inverter while disabled.
+  
+  ---
+  Test 4 — Ramp rate limiting
+
+  Do: Change Sim Grid Power from 2000 → 8000 W (a 6000 W step).
+
+  Expect:
+  - Error = 8000 − 2000 = 6000 W, but ramp_step = 1500 W, so command only moves +1500 W per tick
+  - If currently at 5000 W (max discharge), it pins there immediately and mode stays emhass_tracking
+  - If you reset command lower first (toggle Enabled off/on), you'll see the staircase climb: +1500 each tick
+
+  What it verifies: Ramp limiting prevents sudden large steps to the inverter.
+
+  ---
+  Test 5 — Grid safety clamp (import ceiling)
+
+  Do: Set Sim Grid Power to 14 000 W with Sim MPC Grid Power at 0 (target = 0).
+
+  Expect:
+  - Controller tries to discharge ≥ 12 000 W to cover the error
+  - But import_limit = 12 000 W and max_discharge = 5000 W cap the command
+  - Mode may switch to import_ceiling if the grid-safety clamp overrides the ramp
+  - Import Headroom drops to near 0
+  - Voltx Command pins at 5000 W (the max discharge limit)
+
+  What it verifies: The hard grid-safety clamp and inverter physical limits both enforce correctly.
+
+  ---
+  Quick sanity reference
+
+  ┌────────────────────────┬─────────────────────────────────────────────────────────────────────────┐
+  │         Sensor         │                            What it tells you                            │
+  ├────────────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Mode                   │ Which constraint is currently binding                                   │
+  ├────────────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Voltx Command          │ What was actually written to the (sim) inverter this tick               │
+  ├────────────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Grid Target            │ What the controller is trying to achieve (sign-corrected EMHASS output) │
+  ├────────────────────────┼─────────────────────────────────────────────────────────────────────────┤
+  │ Import/Export Headroom │ Distance from the configured hard limits                                │
+  └────────────────────────┴─────────────────────────────────────────────────────────────────────────┘
+  
+  
