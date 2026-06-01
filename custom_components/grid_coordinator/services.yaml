@@ -1,0 +1,69 @@
+set_mode:
+  name: Set Override Mode
+  description: >
+    Manually override the coordinator's operating mode. The override expires
+    automatically after the specified duration. Call with mode 'auto' to cancel
+    any active override immediately.
+  fields:
+    mode:
+      name: Mode
+      description: >
+        Operating mode to apply.
+        'auto' cancels any active override and returns to normal EMHASS tracking.
+        'self_consume' forces the inverter to self-consumption mode regardless of the EMHASS target (like Amber "Consume Battery Energy").
+        'hold_soc' freezes the battery at 0W — grid and solar absorb all loads, battery neither charges nor discharges (like Amber "Preserve Battery Energy"). Grid safety limits still apply.
+        'force_charge' charges the battery at the specified power (or max_charge if unset) (like Amber "Charge Battery").
+        'force_export' discharges the battery at the specified power (or max_discharge if unset) (like Amber "Dispatch Battery Energy").
+        'disabled' stops the coordinator from writing to the inverter (inverter enters self-consumption).
+      required: true
+      selector:
+        select:
+          options:
+            - value: auto
+              label: Auto (follow EMHASS)
+            - value: self_consume
+              label: Self-consumption (Consume Battery Energy)
+            - value: hold_soc
+              label: Hold SOC (Preserve Battery Energy)
+            - value: force_charge
+              label: Force charge (Charge Battery)
+            - value: force_export
+              label: Force export / discharge (Dispatch Battery Energy)
+            - value: disabled
+              label: Disabled
+    power_w:
+      name: Power (W)
+      description: >
+        Target power in watts for force_charge or force_export modes.
+        Defaults to the inverter's configured maximum if omitted.
+        Ignored for auto, self_consume, and disabled modes.
+      required: false
+      selector:
+        number:
+          min: 0
+          max: 20000
+          step: 100
+          unit_of_measurement: W
+    duration_minutes:
+      name: Duration (minutes)
+      description: >
+        How long the override stays active before automatically reverting to auto.
+        Default is 60 minutes. Maximum is 240 minutes (4 hours).
+      required: false
+      default: 60
+      selector:
+        number:
+          min: 1
+          max: 240
+          step: 1
+          unit_of_measurement: min
+    bypass_soc:
+      name: Bypass SOC limits
+      description: >
+        When true, force_charge ignores the configured SOC maximum and
+        force_export ignores the SOC minimum. Use with caution.
+        Has no effect on other modes.
+      required: false
+      default: false
+      selector:
+        boolean:

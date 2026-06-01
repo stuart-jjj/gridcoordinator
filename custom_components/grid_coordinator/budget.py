@@ -19,6 +19,7 @@ def compute_voltx_command(
     export_limit: float,
     ramp_step: float,
     plan_is_stale: bool,
+    tracking_deadband: float = 0.0,
 ) -> tuple[float, CoordinatorMode]:
     """Compute the Voltx battery command for one 10 s tick.
 
@@ -41,6 +42,13 @@ def compute_voltx_command(
 
     Returns (command_W rounded to int, active_mode).
     """
+    # Tracking deadband — hold the current command when the grid error is small.
+    # Prevents command chatter from measurement noise and small load fluctuations.
+    # Grid safety limits are not re-evaluated here; prev_cmd was already safe.
+    if abs(grid_actual - grid_target) <= tracking_deadband:
+        mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
+        return round(prev_cmd), mode
+
     uncontrolled = grid_actual + prev_cmd
     cmd_floor = uncontrolled - import_limit
     cmd_ceil = uncontrolled + export_limit
@@ -74,6 +82,11 @@ def compute_voltx_command(
     elif final_cmd < ramped_cmd - 1:
         mode = CoordinatorMode.EXPORT_CEILING
 
+    # Re-apply inverter physical limits last so the written command is always
+    # deliverable even when the grid-safety clamp demands more than the inverter
+    # can provide (overloaded scenario: grid_power > import_limit + max_discharge).
+    final_cmd = max(-max_charge, min(max_discharge, final_cmd))
+
     return round(final_cmd), mode
 
 
@@ -86,6 +99,7 @@ def build_coordinator_data(
     import_limit: float,
     export_limit: float,
     plan_age_minutes: float,
+    override_mode: str | None = None,
 ) -> CoordinatorData:
     """Construct CoordinatorData with derived headroom fields."""
     return CoordinatorData(
@@ -96,4 +110,5 @@ def build_coordinator_data(
         import_headroom=import_limit - grid_actual,
         export_headroom=export_limit + grid_actual,
         plan_age_minutes=round(plan_age_minutes, 1),
+        override_mode=override_mode,
     )

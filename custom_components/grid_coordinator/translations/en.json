@@ -3,25 +3,117 @@
     "step": {
       "user": {
         "title": "Grid Coordinator Setup",
-        "description": "Configure hard grid limits and control parameters. Entity IDs are set in const.py for the MVP.",
+        "description": "Configure controller parameters. Enable **Testing mode** to create simulated entities automatically — useful in a devcontainer where real devices are unavailable.",
         "data": {
+          "test_mode": "Testing mode (create simulated entities)",
           "import_limit": "Import limit (W)",
           "export_limit": "Export limit (W)",
           "ramp_step": "Ramp step per 10 s tick (W)",
           "plan_stale_minutes": "EMHASS plan stale after (minutes)",
-          "mpc_sign_inverted": "EMHASS mpc_grid_power positive = export to grid (invert sign)"
+          "mpc_sign_inverted": "EMHASS mpc_grid_power positive = export to grid (invert sign)",
+          "self_consumption_mode": "Self-consumption work mode name",
+          "self_consumption_deadband": "Self-consumption deadband (W)",
+          "tracking_deadband": "Tracking deadband (W)"
         },
         "data_description": {
+          "test_mode": "Creates simulated number/select/switch entities and wires them up automatically. Enable the 'Sim Enabled' switch in HA to start the control loop.",
           "import_limit": "Maximum safe grid import. 12000 W is a safe limit for a 15 kW single-phase connection.",
           "export_limit": "Maximum permitted grid export. 10000 W is a typical network rule for solar installations.",
           "ramp_step": "Maximum change in battery command per tick. Smaller = smoother; larger = faster response.",
           "plan_stale_minutes": "If the EMHASS plan has not been updated in this many minutes, the coordinator falls back to a zero grid-exchange target.",
-          "mpc_sign_inverted": "EMHASS convention: positive mpc_grid_power means export to grid. Leave on unless you have confirmed your EMHASS instance uses the opposite convention."
+          "mpc_sign_inverted": "EMHASS convention: positive mpc_grid_power means export to grid. Leave on unless you have confirmed your EMHASS instance uses the opposite convention.",
+          "self_consumption_mode": "Exact work mode name for self-consumption on your inverter. 'Self-consumption' for Voltx Modbus; 'Self-consumption mode' for Solplanet.",
+          "self_consumption_deadband": "When |grid_target| is within this band of zero, the coordinator hands off to the inverter's native self-consumption mode. Default ±50 W.",
+          "tracking_deadband": "If the grid error (actual minus target) is within this band, the battery command is held unchanged. Prevents command chatter from measurement noise and small load fluctuations. Default 200 W."
+        }
+      },
+      "entities": {
+        "title": "Entity Configuration",
+        "description": "Enter the Home Assistant entity IDs for each signal. These must match the entity IDs exactly as shown in Developer Tools → States.",
+        "data": {
+          "entity_grid_power": "Grid power sensor",
+          "entity_mpc_grid_power": "EMHASS MPC grid power sensor",
+          "entity_voltx_soc": "Battery state of charge sensor (%)",
+          "entity_voltx_max_charge": "Battery max charging power limit (W)",
+          "entity_voltx_max_discharge": "Battery max discharging power limit (W)",
+          "entity_soc_min": "SOC minimum limit (%)",
+          "entity_soc_max": "SOC maximum limit (%)",
+          "entity_enabled": "Enable/disable gate (input_boolean or switch)",
+          "entity_voltx_cmd": "Battery charge/discharge command (number entity)",
+          "entity_voltx_work_mode": "Inverter work mode (select entity)"
+        },
+        "data_description": {
+          "entity_grid_power": "Positive = importing from grid. E.g. sensor.iammeter_power_a",
+          "entity_mpc_grid_power": "EMHASS output — sign handled by the 'invert sign' option above.",
+          "entity_voltx_soc": "0–100 %.",
+          "entity_voltx_max_charge": "Maximum power the inverter will draw from the grid to charge.",
+          "entity_voltx_max_discharge": "Maximum power the inverter will push to the house/grid.",
+          "entity_soc_min": "Below this SOC the controller will not charge the battery.",
+          "entity_soc_max": "Above this SOC the controller will not discharge the battery.",
+          "entity_enabled": "When off, the coordinator is dormant and leaves the inverter untouched.",
+          "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
+          "entity_voltx_work_mode": "Must support the 'Custom' option."
         }
       }
     },
     "abort": {
       "already_configured": "Grid Coordinator is already configured."
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Controller Parameters",
+        "description": "Adjust controller settings. Changing **Testing mode** will reload the integration and create or remove simulated entities.",
+        "data": {
+          "test_mode": "Testing mode (create simulated entities)",
+          "import_limit": "Import limit (W)",
+          "export_limit": "Export limit (W)",
+          "ramp_step": "Ramp step per 10 s tick (W)",
+          "plan_stale_minutes": "EMHASS plan stale after (minutes)",
+          "mpc_sign_inverted": "EMHASS mpc_grid_power positive = export to grid (invert sign)",
+          "self_consumption_mode": "Self-consumption work mode name",
+          "self_consumption_deadband": "Self-consumption deadband (W)",
+          "tracking_deadband": "Tracking deadband (W)"
+        },
+        "data_description": {
+          "test_mode": "When enabled, simulated entities are created for all signals. Disabling removes them on next reload.",
+          "import_limit": "Maximum safe grid import.",
+          "export_limit": "Maximum permitted grid export.",
+          "ramp_step": "Maximum change in battery command per tick.",
+          "plan_stale_minutes": "Minutes before the EMHASS plan is considered stale.",
+          "mpc_sign_inverted": "Leave on for standard EMHASS injection convention.",
+          "tracking_deadband": "Hold the battery command when the grid error is within this band. Reduces Modbus writes and prevents oscillation from measurement noise."
+        }
+      },
+      "entities": {
+        "title": "Entity Configuration",
+        "description": "Override entity IDs for any signal. In testing mode, fields default to the simulated entity IDs — change individual ones to mix real and simulated entities.",
+        "data": {
+          "entity_grid_power": "Grid power sensor",
+          "entity_mpc_grid_power": "EMHASS MPC grid power sensor",
+          "entity_voltx_soc": "Battery state of charge sensor (%)",
+          "entity_voltx_max_charge": "Battery max charging power limit (W)",
+          "entity_voltx_max_discharge": "Battery max discharging power limit (W)",
+          "entity_soc_min": "SOC minimum limit (%)",
+          "entity_soc_max": "SOC maximum limit (%)",
+          "entity_enabled": "Enable/disable gate",
+          "entity_voltx_cmd": "Battery charge/discharge command",
+          "entity_voltx_work_mode": "Inverter work mode"
+        },
+        "data_description": {
+          "entity_grid_power": "Positive = importing from grid.",
+          "entity_mpc_grid_power": "EMHASS output.",
+          "entity_voltx_soc": "0–100 %.",
+          "entity_voltx_max_charge": "Max charging power in W.",
+          "entity_voltx_max_discharge": "Max discharging power in W.",
+          "entity_soc_min": "Below this SOC the controller will not charge.",
+          "entity_soc_max": "Above this SOC the controller will not discharge.",
+          "entity_enabled": "When off, the coordinator is dormant.",
+          "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
+          "entity_voltx_work_mode": "Must support the 'Custom' option."
+        }
+      }
     }
   }
 }

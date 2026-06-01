@@ -10,27 +10,35 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .budget import build_coordinator_data, compute_voltx_command
 from .const import (
+    CONF_ENTITY_ENABLED,
+    CONF_ENTITY_GRID_POWER,
+    CONF_ENTITY_MPC_GRID_POWER,
+    CONF_ENTITY_SOC_MAX,
+    CONF_ENTITY_SOC_MIN,
+    CONF_ENTITY_VOLTX_CMD,
+    CONF_ENTITY_VOLTX_MAX_CHARGE,
+    CONF_ENTITY_VOLTX_MAX_DISCHARGE,
+    CONF_ENTITY_VOLTX_SOC,
+    CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_EXPORT_LIMIT,
     CONF_IMPORT_LIMIT,
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
+    CONF_SELF_CONSUMPTION_DEADBAND,
+    CONF_SELF_CONSUMPTION_MODE,
+    CONF_TRACKING_DEADBAND,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_IMPORT_LIMIT,
     DEFAULT_MPC_SIGN_INVERTED,
+    DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
+    DEFAULT_SELF_CONSUMPTION_DEADBAND,
+    DEFAULT_SELF_CONSUMPTION_MODE,
+    DEFAULT_TRACKING_DEADBAND,
     DOMAIN,
-    ENTITY_ENABLED,
-    ENTITY_GRID_POWER,
-    ENTITY_MPC_GRID_POWER,
-    ENTITY_SOC_MAX,
-    ENTITY_SOC_MIN,
-    ENTITY_VOLTX_CMD,
-    ENTITY_VOLTX_MAX_CHARGE,
-    ENTITY_VOLTX_MAX_DISCHARGE,
-    ENTITY_VOLTX_SOC,
-    ENTITY_VOLTX_WORK_MODE,
+    ENTITY_ID_DEFAULTS,
     LOGGER,
     UPDATE_INTERVAL_SECONDS,
     VOLTX_WORK_MODE_CUSTOM,
@@ -60,9 +68,9 @@ def _str(hass: HomeAssistant, entity_id: str, default: str = "") -> str:
     return state.state if state else default
 
 
-def _plan_age_minutes(hass: HomeAssistant) -> float:
-    """Return minutes since mpc_grid_power was last updated (inf if missing)."""
-    state = hass.states.get(ENTITY_MPC_GRID_POWER)
+def _plan_age_minutes(hass: HomeAssistant, entity_id: str) -> float:
+    """Return minutes since the MPC entity was last updated (inf if missing)."""
+    state = hass.states.get(entity_id)
     if state is None:
         return float("inf")
     return (datetime.now(UTC) - state.last_updated).total_seconds() / 60
@@ -84,6 +92,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def __init__(self, hass: HomeAssistant, entry: GridCoordinatorConfigEntry) -> None:
         self._prev_cmd: float = 0.0
         self._entry = entry
+        # Manual override state — all cleared on HA restart or integration reload
+        self._override_mode: str | None = None
+        self._override_power: float | None = None
+        self._override_bypass_soc: bool = False
+        self._override_expires: datetime | None = None
         super().__init__(
             hass=hass,
             logger=LOGGER,
@@ -91,27 +104,77 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             update_interval=timedelta(seconds=UPDATE_INTERVAL_SECONDS),
         )
 
-    # ── config properties ─────────────────────────────────────────────────────
+    # ── config helpers ────────────────────────────────────────────────────────
+
+    def _opt(self, key: str, default):
+        """Read from entry options first, then entry data, then supplied default."""
+        if key in self._entry.options:
+            return self._entry.options[key]
+        return self._entry.data.get(key, default)
+
+    def _eid(self, key: str) -> str:
+        """Return the configured entity ID for the given CONF_ENTITY_* key."""
+        return self._opt(key, ENTITY_ID_DEFAULTS[key])
 
     @property
     def _import_limit(self) -> float:
-        return float(self._entry.data.get(CONF_IMPORT_LIMIT, DEFAULT_IMPORT_LIMIT))
+        return float(self._opt(CONF_IMPORT_LIMIT, DEFAULT_IMPORT_LIMIT))
 
     @property
     def _export_limit(self) -> float:
-        return float(self._entry.data.get(CONF_EXPORT_LIMIT, DEFAULT_EXPORT_LIMIT))
+        return float(self._opt(CONF_EXPORT_LIMIT, DEFAULT_EXPORT_LIMIT))
 
     @property
     def _ramp_step(self) -> float:
-        return float(self._entry.data.get(CONF_RAMP_STEP, DEFAULT_RAMP_STEP))
+        return float(self._opt(CONF_RAMP_STEP, DEFAULT_RAMP_STEP))
 
     @property
     def _stale_minutes(self) -> float:
-        return float(self._entry.data.get(CONF_PLAN_STALE_MINUTES, DEFAULT_PLAN_STALE_MINUTES))
+        return float(self._opt(CONF_PLAN_STALE_MINUTES, DEFAULT_PLAN_STALE_MINUTES))
 
     @property
     def _mpc_sign_inverted(self) -> bool:
-        return bool(self._entry.data.get(CONF_MPC_SIGN_INVERTED, DEFAULT_MPC_SIGN_INVERTED))
+        return bool(self._opt(CONF_MPC_SIGN_INVERTED, DEFAULT_MPC_SIGN_INVERTED))
+
+    @property
+    def _self_consumption_mode(self) -> str:
+        return str(self._opt(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE))
+
+    @property
+    def _self_consumption_deadband(self) -> float:
+        return float(self._opt(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND))
+
+    @property
+    def _tracking_deadband(self) -> float:
+        return float(self._opt(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND))
+
+    # ── override control ──────────────────────────────────────────────────────
+
+    def set_override(
+        self,
+        mode: str,
+        *,
+        power_w: float | None = None,
+        duration_minutes: float = DEFAULT_OVERRIDE_DURATION_MINUTES,
+        bypass_soc: bool = False,
+    ) -> None:
+        """Set or clear a manual operating-mode override.
+
+        Call with mode='auto' to cancel any active override and return to
+        normal EMHASS tracking.  The override auto-expires after duration_minutes
+        and is always lost on HA restart or integration reload.
+        """
+        if mode == "auto":
+            self._override_mode = None
+            self._override_power = None
+            self._override_bypass_soc = False
+            self._override_expires = None
+        else:
+            self._override_mode = mode
+            self._override_power = power_w
+            self._override_bypass_soc = bypass_soc
+            self._override_expires = datetime.now(UTC) + timedelta(minutes=duration_minutes)
+        LOGGER.debug("override set: mode=%s power=%s duration=%.0fmin", mode, power_w, duration_minutes)
 
     # ── main loop ─────────────────────────────────────────────────────────────
 
@@ -119,46 +182,90 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """Called every UPDATE_INTERVAL_SECONDS by the DataUpdateCoordinator."""
         hass = self.hass
 
+        entity_enabled = self._eid(CONF_ENTITY_ENABLED)
+        entity_grid = self._eid(CONF_ENTITY_GRID_POWER)
+        entity_mpc = self._eid(CONF_ENTITY_MPC_GRID_POWER)
+        entity_soc = self._eid(CONF_ENTITY_VOLTX_SOC)
+        entity_max_charge = self._eid(CONF_ENTITY_VOLTX_MAX_CHARGE)
+        entity_max_discharge = self._eid(CONF_ENTITY_VOLTX_MAX_DISCHARGE)
+        entity_soc_min = self._eid(CONF_ENTITY_SOC_MIN)
+        entity_soc_max = self._eid(CONF_ENTITY_SOC_MAX)
+
         # ── disabled gate ──────────────────────────────────────────────────
-        if _str(hass, ENTITY_ENABLED, "off") != "on":
+        if _str(hass, entity_enabled, "off") != "on":
+            await self._async_enter_self_consumption()
+            self._prev_cmd = 0.0
             return build_coordinator_data(
                 mode=CoordinatorMode.DISABLED,
-                grid_actual=_float(hass, ENTITY_GRID_POWER, 0.0),
+                grid_actual=_float(hass, entity_grid, 0.0),
                 grid_target=0.0,
-                voltx_command=self._prev_cmd,
+                voltx_command=0.0,
                 import_limit=self._import_limit,
                 export_limit=self._export_limit,
-                plan_age_minutes=_plan_age_minutes(hass),
+                plan_age_minutes=_plan_age_minutes(hass, entity_mpc),
             )
 
         # ── read grid power (critical — fail fast if unavailable) ──────────
-        grid_state = hass.states.get(ENTITY_GRID_POWER)
+        grid_state = hass.states.get(entity_grid)
         if grid_state is None or grid_state.state in ("unavailable", "unknown"):
-            raise UpdateFailed(f"{ENTITY_GRID_POWER} is unavailable")
+            raise UpdateFailed(f"{entity_grid} is unavailable")
         try:
             grid_actual = float(grid_state.state)
         except (ValueError, TypeError) as exc:
-            raise UpdateFailed(f"{ENTITY_GRID_POWER} has non-numeric state") from exc
+            raise UpdateFailed(f"{entity_grid} has non-numeric state") from exc
+
+        # ── manual override ────────────────────────────────────────────────
+        # Expire and clear the override if its duration has elapsed.
+        if self._override_expires and datetime.now(UTC) >= self._override_expires:
+            LOGGER.debug("override expired")
+            self.set_override("auto")
+        if self._override_mode is not None:
+            plan_age = _plan_age_minutes(hass, entity_mpc)
+            return await self._async_handle_override(grid_actual, plan_age)
 
         # ── read EMHASS setpoint ───────────────────────────────────────────
-        plan_age = _plan_age_minutes(hass)
-        mpc_raw = _float(hass, ENTITY_MPC_GRID_POWER, 0.0)
+        plan_age = _plan_age_minutes(hass, entity_mpc)
+        mpc_raw = _float(hass, entity_mpc, 0.0)
         # Correct for EMHASS injection convention if needed so that both
         # grid_actual and grid_target share the "positive = import" basis.
         grid_target = -mpc_raw if self._mpc_sign_inverted else mpc_raw
         plan_is_stale = plan_age > self._stale_minutes
 
+        # ── self-consumption deadband check ───────────────────────────────
+        # When the effective target is within the deadband of zero, hand off to
+        # the inverter's native self-consumption mode which reacts at firmware
+        # speed. prev_cmd is reset to 0 so the ramp starts clean on exit.
+        effective_target = grid_target if not plan_is_stale else 0.0
+        if abs(effective_target) <= self._self_consumption_deadband:
+            await self._async_enter_self_consumption()
+            self._prev_cmd = 0.0
+            sc_mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
+            LOGGER.debug(
+                "tick | grid=%.0fW target=%.0fW mode=%s age=%.1fmin (self-consumption)",
+                grid_actual, grid_target, sc_mode, plan_age,
+            )
+            return build_coordinator_data(
+                mode=sc_mode,
+                grid_actual=grid_actual,
+                grid_target=effective_target,
+                voltx_command=0.0,
+                import_limit=self._import_limit,
+                export_limit=self._export_limit,
+                plan_age_minutes=plan_age,
+                override_mode=None,
+            )
+
         # ── read battery / inverter state ──────────────────────────────────
-        soc = _float(hass, ENTITY_VOLTX_SOC, 50.0)
-        soc_min = _float(hass, ENTITY_SOC_MIN, 20.0)
-        soc_max = _float(hass, ENTITY_SOC_MAX, 95.0)
-        max_charge = _float(hass, ENTITY_VOLTX_MAX_CHARGE, 5000.0)
-        max_discharge = _float(hass, ENTITY_VOLTX_MAX_DISCHARGE, 5000.0)
+        soc = _float(hass, entity_soc, 50.0)
+        soc_min = _float(hass, entity_soc_min, 20.0)
+        soc_max = _float(hass, entity_soc_max, 95.0)
+        max_charge = _float(hass, entity_max_charge, 5000.0)
+        max_discharge = _float(hass, entity_max_discharge, 5000.0)
 
         # ── compute command (pure function, no HA calls) ───────────────────
         command, mode = compute_voltx_command(
             grid_actual=grid_actual,
-            grid_target=grid_target if not plan_is_stale else 0.0,
+            grid_target=effective_target,
             prev_cmd=self._prev_cmd,
             soc=soc,
             soc_min=soc_min,
@@ -169,6 +276,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             export_limit=self._export_limit,
             ramp_step=self._ramp_step,
             plan_is_stale=plan_is_stale,
+            tracking_deadband=self._tracking_deadband,
         )
 
         # ── write to inverter ──────────────────────────────────────────────
@@ -193,28 +301,144 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             import_limit=self._import_limit,
             export_limit=self._export_limit,
             plan_age_minutes=plan_age,
+            override_mode=None,
+        )
+
+    # ── override dispatch ─────────────────────────────────────────────────────
+
+    async def _async_handle_override(
+        self, grid_actual: float, plan_age: float
+    ) -> CoordinatorData:
+        """Execute one tick under the active manual override."""
+        hass = self.hass
+        mode_str = self._override_mode  # guaranteed non-None by caller
+
+        if mode_str in ("disabled", "self_consume"):
+            await self._async_enter_self_consumption()
+            self._prev_cmd = 0.0
+            coord_mode = (
+                CoordinatorMode.OVERRIDE_DISABLED
+                if mode_str == "disabled"
+                else CoordinatorMode.OVERRIDE_SELF_CONSUME
+            )
+            LOGGER.debug("tick | override=%s mode=%s", mode_str, coord_mode)
+            return build_coordinator_data(
+                mode=coord_mode,
+                grid_actual=grid_actual,
+                grid_target=0.0,
+                voltx_command=0.0,
+                import_limit=self._import_limit,
+                export_limit=self._export_limit,
+                plan_age_minutes=plan_age,
+                override_mode=mode_str,
+            )
+
+        # hold_soc / force_charge / force_export — need battery state
+        soc = _float(hass, self._eid(CONF_ENTITY_VOLTX_SOC), 50.0)
+        soc_min = _float(hass, self._eid(CONF_ENTITY_SOC_MIN), 20.0)
+        soc_max = _float(hass, self._eid(CONF_ENTITY_SOC_MAX), 95.0)
+        max_charge = _float(hass, self._eid(CONF_ENTITY_VOLTX_MAX_CHARGE), 5000.0)
+        max_discharge = _float(hass, self._eid(CONF_ENTITY_VOLTX_MAX_DISCHARGE), 5000.0)
+
+        uncontrolled = grid_actual + self._prev_cmd
+        cmd_floor = uncontrolled - self._import_limit   # discharge floor: import safety
+        cmd_ceil = uncontrolled + self._export_limit    # charge ceiling: export safety
+
+        if mode_str == "hold_soc":
+            # Freeze battery at 0W — grid and solar absorb all loads; battery neither
+            # charges nor discharges.  Grid safety still applies: if the hard import or
+            # export limit would be breached at 0W, the coordinator adjusts accordingly.
+            cmd = max(cmd_floor, min(0.0, cmd_ceil))
+            cmd = max(-max_charge, min(max_discharge, cmd))
+            coord_mode = CoordinatorMode.OVERRIDE_HOLD_SOC
+
+        elif mode_str == "force_charge":
+            target = min(
+                self._override_power if self._override_power is not None else max_charge,
+                max_charge,
+            )
+            if soc >= soc_max and not self._override_bypass_soc:
+                cmd = 0.0
+            else:
+                cmd = max(-target, cmd_floor)
+                cmd = max(-max_charge, cmd)
+            coord_mode = CoordinatorMode.OVERRIDE_FORCE_CHARGE
+
+        else:  # force_export
+            target = min(
+                self._override_power if self._override_power is not None else max_discharge,
+                max_discharge,
+            )
+            if soc <= soc_min and not self._override_bypass_soc:
+                cmd = 0.0
+            else:
+                cmd = min(target, cmd_ceil)
+                cmd = min(max_discharge, cmd)
+            coord_mode = CoordinatorMode.OVERRIDE_FORCE_EXPORT
+
+        command = round(cmd)
+        await self._async_write_voltx(command)
+        self._prev_cmd = command
+
+        LOGGER.debug(
+            "tick | override=%s cmd=%.0fW soc=%.0f%%",
+            mode_str, command, soc,
+        )
+        return build_coordinator_data(
+            mode=coord_mode,
+            grid_actual=grid_actual,
+            grid_target=0.0,
+            voltx_command=command,
+            import_limit=self._import_limit,
+            export_limit=self._export_limit,
+            plan_age_minutes=plan_age,
+            override_mode=mode_str,
         )
 
     # ── inverter write ────────────────────────────────────────────────────────
 
-    async def _async_write_voltx(self, command: float) -> None:
-        """Ensure Custom work mode then apply the power setpoint."""
-        hass = self.hass
+    async def _async_set_work_mode(self, mode_name: str) -> bool:
+        """Switch the inverter work mode if it is not already set.
 
-        if _str(hass, ENTITY_VOLTX_WORK_MODE) != VOLTX_WORK_MODE_CUSTOM:
-            await hass.services.async_call(
+        Returns True when a switch was actually performed, False when already
+        in the target mode or when the entity does not yet exist.
+        No-ops silently when the entity is absent so it is safe to call from
+        the disabled branch without risking UpdateFailed.
+        """
+        entity_work_mode = self._eid(CONF_ENTITY_VOLTX_WORK_MODE)
+        current = _str(self.hass, entity_work_mode)
+        if current and current != mode_name:
+            await self.hass.services.async_call(
                 "select",
                 "select_option",
-                {
-                    "entity_id": ENTITY_VOLTX_WORK_MODE,
-                    "option": VOLTX_WORK_MODE_CUSTOM,
-                },
+                {"entity_id": entity_work_mode, "option": mode_name},
                 blocking=True,
             )
+            return True
+        return False
 
-        await hass.services.async_call(
+    async def _async_enter_self_consumption(self) -> None:
+        """Switch to self-consumption mode and zero the power register on transition.
+
+        Zeroing only happens on the tick where the mode actually changes so we
+        do not generate unnecessary Modbus traffic every tick.
+        """
+        if await self._async_set_work_mode(self._self_consumption_mode):
+            entity_cmd = self._eid(CONF_ENTITY_VOLTX_CMD)
+            if self.hass.states.get(entity_cmd) is not None:
+                await self.hass.services.async_call(
+                    "number",
+                    "set_value",
+                    {"entity_id": entity_cmd, "value": "0"},
+                    blocking=True,
+                )
+
+    async def _async_write_voltx(self, command: float) -> None:
+        """Ensure Custom work mode then apply the power setpoint."""
+        await self._async_set_work_mode(VOLTX_WORK_MODE_CUSTOM)
+        await self.hass.services.async_call(
             "number",
             "set_value",
-            {"entity_id": ENTITY_VOLTX_CMD, "value": str(command)},
+            {"entity_id": self._eid(CONF_ENTITY_VOLTX_CMD), "value": str(command)},
             blocking=True,
         )
