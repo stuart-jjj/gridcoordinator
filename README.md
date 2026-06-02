@@ -4,7 +4,7 @@ Grid Coordinator is a Home Assistant custom integration that runs a 10-second
 control loop to steer a Voltx battery inverter so household grid import/export
 tracks an EMHASS MPC setpoint.
 
-[![Open your Home Assistant instance and add this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=stuartjones&repository=grid_coordinator&category=integration)
+[![Open your Home Assistant instance and add this repository in HACS](https://my.home-assistant.io/badges/hacs_repository.svg)](https://my.home-assistant.io/redirect/hacs_repository/?owner=stuart-jjj&repository=gridcoordinator&category=integration)
 
 ## What it does
 
@@ -73,10 +73,9 @@ from Settings > Devices & Services.
 
 HACS custom repository quick link:
 
-[Add repository to HACS](https://my.home-assistant.io/redirect/hacs_repository/?owner=stuartjones&repository=grid_coordinator&category=integration)
+[Add repository to HACS](https://my.home-assistant.io/redirect/hacs_repository/?owner=stuart-jjj&repository=gridcoordinator&category=integration)
 
-If you are developing this repo locally, see [CLAUDE.md](CLAUDE.md) for
-devcontainer-specific setup and runtime notes.
+If you are developing this repo locally, see the devcontainer setup notes in `CLAUDE.md` (not tracked in the repo — available in the local workspace).
 
 ## Development
 
