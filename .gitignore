@@ -13,9 +13,7 @@ __pycache__
 coverage.xml
 .ruff_cache
 CLAUDE.md
+docs
 
 # Home Assistant configuration
 config
-docs
-scripts
-*devcontainer*
