@@ -92,6 +92,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     def __init__(self, hass: HomeAssistant, entry: GridCoordinatorConfigEntry) -> None:
         self._prev_cmd: float = 0.0
+        self._cold_start: bool = True
         self._entry = entry
         # Manual override state — all cleared on HA restart or integration reload
         self._override_mode: str | None = None
@@ -191,6 +192,20 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         entity_max_discharge = self._eid(CONF_ENTITY_VOLTX_MAX_DISCHARGE)
         entity_soc_min = self._eid(CONF_ENTITY_SOC_MIN)
         entity_soc_max = self._eid(CONF_ENTITY_SOC_MAX)
+
+        # ── cold-start: seed prev_cmd from hardware ─────────────────────────
+        # On the first tick after HA starts or the integration is reloaded the
+        # inverter may already be running at a non-zero command.  Reading the
+        # current entity state avoids an unwanted step-change on the first write.
+        if self._cold_start:
+            self._cold_start = False
+            entity_cmd = self._eid(CONF_ENTITY_VOLTX_CMD)
+            self._prev_cmd = _float(hass, entity_cmd, 0.0)
+            LOGGER.debug(
+                "cold start: seeding prev_cmd=%.0fW from %s",
+                self._prev_cmd,
+                entity_cmd,
+            )
 
         # ── disabled gate ──────────────────────────────────────────────────
         if _str(hass, entity_enabled, "off") != "on":
