@@ -12,7 +12,10 @@ __pycache__
 .coverage
 coverage.xml
 .ruff_cache
+CLAUDE.md
 
 # Home Assistant configuration
-config/*
-!config/configuration.yaml
+config
+docs
+scripts
+*devcontainer*

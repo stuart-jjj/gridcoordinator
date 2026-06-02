@@ -1,13 +1,10 @@
 {
   "domain": "grid_coordinator",
   "name": "Grid Coordinator",
-  "codeowners": [
-    "@stuartj"
-  ],
+  "codeowners": ["@stuart-jjj"],
   "config_flow": true,
-  "documentation": "https://github.com/stuartjones/grid_coordinator",
-  "iot_class": "local_polling",
-  "issue_tracker": "https://github.com/stuartjones/grid_coordinator/issues",
+  "documentation": "https://github.com/stuart-jjj/gridcoordinator",
+  "issue_tracker": "https://github.com/stuart-jjj/gridcoordinator/issues",
   "version": "0.1.0",
   "requirements": []
 }
