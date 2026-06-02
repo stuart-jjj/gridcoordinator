@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -408,12 +409,13 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         entity_work_mode = self._eid(CONF_ENTITY_VOLTX_WORK_MODE)
         current = _str(self.hass, entity_work_mode)
         if current and current != mode_name:
-            await self.hass.services.async_call(
-                "select",
-                "select_option",
-                {"entity_id": entity_work_mode, "option": mode_name},
-                blocking=True,
-            )
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "select",
+                    "select_option",
+                    {"entity_id": entity_work_mode, "option": mode_name},
+                    blocking=True,
+                )
             return True
         return False
 
@@ -426,19 +428,21 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if await self._async_set_work_mode(self._self_consumption_mode):
             entity_cmd = self._eid(CONF_ENTITY_VOLTX_CMD)
             if self.hass.states.get(entity_cmd) is not None:
-                await self.hass.services.async_call(
-                    "number",
-                    "set_value",
-                    {"entity_id": entity_cmd, "value": "0"},
-                    blocking=True,
-                )
+                async with asyncio.timeout(5):
+                    await self.hass.services.async_call(
+                        "number",
+                        "set_value",
+                        {"entity_id": entity_cmd, "value": "0"},
+                        blocking=True,
+                    )
 
     async def _async_write_voltx(self, command: float) -> None:
         """Ensure Custom work mode then apply the power setpoint."""
         await self._async_set_work_mode(VOLTX_WORK_MODE_CUSTOM)
-        await self.hass.services.async_call(
-            "number",
-            "set_value",
-            {"entity_id": self._eid(CONF_ENTITY_VOLTX_CMD), "value": str(command)},
-            blocking=True,
-        )
+        async with asyncio.timeout(5):
+            await self.hass.services.async_call(
+                "number",
+                "set_value",
+                {"entity_id": self._eid(CONF_ENTITY_VOLTX_CMD), "value": str(command)},
+                blocking=True,
+            )

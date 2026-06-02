@@ -16,8 +16,8 @@ class CoordinatorMode(StrEnum):
     STALE_PLAN = "stale_plan"           # EMHASS plan too old; holding zero grid target
     IMPORT_CEILING = "import_ceiling"   # import limit is the binding constraint
     EXPORT_CEILING = "export_ceiling"   # export limit is the binding constraint
-    SOC_FLOOR = "soc_floor"             # battery at min SOC, charging suppressed
-    SOC_CEILING = "soc_ceiling"         # battery at max SOC, discharging suppressed
+    SOC_FLOOR = "soc_floor"             # battery at min SOC, discharging suppressed
+    SOC_CEILING = "soc_ceiling"         # battery at max SOC, charging suppressed
     # Manual override modes (set via service call or override select entity)
     OVERRIDE_SELF_CONSUME = "override_self_consume"
     OVERRIDE_HOLD_SOC = "override_hold_soc"

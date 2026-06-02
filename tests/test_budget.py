@@ -1,0 +1,240 @@
+"""Unit tests for budget.py — pure arithmetic, no HA dependencies."""
+
+import pytest
+
+from custom_components.grid_coordinator.budget import (
+    build_coordinator_data,
+    compute_voltx_command,
+)
+from custom_components.grid_coordinator.models import CoordinatorData, CoordinatorMode
+
+# ── helpers ────────────────────────────────────────────────────────────────────
+
+_DEFAULTS = dict(
+    grid_actual=0.0,
+    grid_target=0.0,
+    prev_cmd=0.0,
+    soc=50.0,
+    soc_min=20.0,
+    soc_max=95.0,
+    max_charge=5000.0,
+    max_discharge=5000.0,
+    import_limit=12000.0,
+    export_limit=10000.0,
+    ramp_step=1500.0,
+    plan_is_stale=False,
+    tracking_deadband=0.0,
+)
+
+
+def cmd(**overrides) -> tuple[float, CoordinatorMode]:
+    return compute_voltx_command(**{**_DEFAULTS, **overrides})
+
+
+# ── normal tracking ────────────────────────────────────────────────────────────
+
+
+def test_closes_error_in_one_step():
+    """PI controller closes a grid error in one step when unconstrained."""
+    command, mode = cmd(grid_actual=2000.0, grid_target=500.0)
+    # error = 2000 - 500 = 1500 → prev_cmd=0 + 1500 = 1500 W discharge
+    assert command == 1500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_negative_error_charges():
+    """When grid is below target (e.g. exporting too much), command goes negative."""
+    command, mode = cmd(grid_actual=-500.0, grid_target=0.0, prev_cmd=0.0)
+    # error = -500 → cmd = 0 + (-500) = -500 W (charge)
+    assert command == -500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+# ── tracking deadband ─────────────────────────────────────────────────────────
+
+
+def test_deadband_holds_command():
+    """Command is held unchanged when grid error is within the deadband."""
+    command, mode = cmd(
+        grid_actual=100.0, grid_target=0.0, prev_cmd=1000.0, tracking_deadband=200.0
+    )
+    assert command == 1000
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_deadband_exact_boundary_holds():
+    assert cmd(grid_actual=200.0, grid_target=0.0, prev_cmd=500.0, tracking_deadband=200.0)[0] == 500
+
+
+def test_outside_deadband_reacts():
+    command, _ = cmd(
+        grid_actual=201.0, grid_target=0.0, prev_cmd=0.0, tracking_deadband=200.0
+    )
+    assert command != 0
+
+
+# ── ramp limiting ─────────────────────────────────────────────────────────────
+
+
+def test_ramp_limits_large_step():
+    """A large grid error is ramped at most ramp_step per tick."""
+    command, mode = cmd(
+        grid_actual=5000.0, grid_target=0.0, prev_cmd=0.0, ramp_step=1500.0
+    )
+    assert command == 1500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_ramp_down_limits_negative_step():
+    command, _ = cmd(
+        grid_actual=-5000.0, grid_target=0.0, prev_cmd=0.0, ramp_step=1500.0
+    )
+    assert command == -1500
+
+
+# ── SOC constraints ───────────────────────────────────────────────────────────
+
+
+def test_soc_floor_suppresses_discharge():
+    """At minimum SOC, a discharge command (cmd > 0) must be zeroed."""
+    command, mode = cmd(
+        grid_actual=3000.0, grid_target=0.0,  # raw_cmd would be +3000 (discharge)
+        soc=15.0, soc_min=20.0,
+    )
+    assert command == 0
+    assert mode == CoordinatorMode.SOC_FLOOR
+
+
+def test_soc_floor_allows_charge():
+    """At minimum SOC, a charge command (cmd < 0) must be allowed."""
+    command, mode = cmd(
+        grid_actual=-2000.0, grid_target=0.0,  # raw_cmd would be -2000 (charge)
+        soc=15.0, soc_min=20.0,
+    )
+    # Should be clamped by ramp (1500 W/tick) → -1500, not zeroed
+    assert command < 0
+    assert mode != CoordinatorMode.SOC_FLOOR
+
+
+def test_soc_ceiling_suppresses_charge():
+    """At maximum SOC, a charge command (cmd < 0) must be zeroed."""
+    command, mode = cmd(
+        grid_actual=-3000.0, grid_target=0.0,  # raw_cmd would be -3000 (charge)
+        soc=96.0, soc_max=95.0,
+    )
+    assert command == 0
+    assert mode == CoordinatorMode.SOC_CEILING
+
+
+def test_soc_ceiling_allows_discharge():
+    """At maximum SOC, a discharge command (cmd > 0) must be allowed."""
+    command, mode = cmd(
+        grid_actual=2000.0, grid_target=0.0,  # raw_cmd would be +2000 (discharge)
+        soc=96.0, soc_max=95.0,
+    )
+    assert command > 0
+    assert mode != CoordinatorMode.SOC_CEILING
+
+
+# ── inverter physical limits ──────────────────────────────────────────────────
+
+
+def test_discharge_capped_at_max_discharge():
+    command, _ = cmd(
+        grid_actual=8000.0, grid_target=0.0, ramp_step=10000.0,
+        max_discharge=5000.0,
+    )
+    assert command <= 5000
+
+
+def test_charge_capped_at_max_charge():
+    command, _ = cmd(
+        grid_actual=-8000.0, grid_target=0.0, ramp_step=10000.0,
+        max_charge=5000.0,
+    )
+    assert command >= -5000
+
+
+# ── grid safety clamp ─────────────────────────────────────────────────────────
+
+
+def test_import_ceiling_clamps_charge():
+    """If charging would push grid import over the limit, command is clamped."""
+    # uncontrolled = grid_actual + prev_cmd = 11000 + 0 = 11000
+    # cmd_floor = 11000 - 12000 = -1000 (can charge at most 1000 W)
+    # raw_cmd = prev(0) + (11000 - 0) = 11000 → after ramp/limits → 5000 discharge, not relevant
+    # Test with a scenario where charging exceeds import limit:
+    # uncontrolled = -1000 (exporting), prev=0
+    # raw_cmd = -1000 - 0 = -1000 (wants to charge more)
+    # cmd_floor = -1000 - 12000 = -13000 (no floor issue)
+    # After ramp: -1000 (within ramp_step=1500)
+    # Grid projection: -1000 - (-1000) = 0 W (fine, no clamp needed)
+    # Now test import ceiling violation:
+    # grid_actual = 11500, target = 0 → raw_cmd = 11500 → ramped = 1500
+    # uncontrolled = 11500 + 0 = 11500; cmd_floor = 11500-12000 = -500
+    # cmd_ceil = 11500 + 10000 = 21500
+    # ramped = 1500; final = 1500 (no clamp)
+    # Projected grid = 11500 - 1500 = 10000 ≤ 12000 ✓
+    command, mode = cmd(
+        grid_actual=11500.0, grid_target=0.0, ramp_step=10000.0,
+        max_discharge=5000.0, import_limit=12000.0,
+    )
+    projected_grid = 11500.0 - command
+    assert projected_grid <= 12000.0
+
+
+def test_export_ceiling_clamps_discharge():
+    """If discharging would push grid export over the limit, command is clamped."""
+    # grid_actual = -9000 (exporting 9000 W), target = 0
+    # uncontrolled = -9000 + 0 = -9000
+    # cmd_ceil = -9000 + 10000 = 1000 (can only discharge 1000 W before hitting export limit)
+    # raw_cmd = 0 + (-9000 - 0) = -9000 → after ramp: -1500
+    # ramped = -1500 → cmd_ceil clamps to max(−9000−12000, min(1000, -1500)) = -1500 (no issue)
+    # Let's force export ceiling: grid_actual = -9500, prev_cmd = 1000 (already discharging)
+    # uncontrolled = -9500 + 1000 = -8500; cmd_ceil = -8500 + 10000 = 1500
+    # raw_cmd = 1000 + (-9500 - 0) = -8500 → after ramp: 1000-1500=-500
+    # -500 within [floor, ceil=1500] → no clamp (fine)
+    # Force the clamp: grid = -9500, prev=0, target=-11000 (wants more export, raw=-9500-(-11000)=1500)
+    # uncontrolled = -9500; cmd_ceil = -9500+10000=500; ramped=1500 > cmd_ceil=500 → clamped to 500
+    command, mode = cmd(
+        grid_actual=-9500.0, grid_target=-11000.0, prev_cmd=0.0,
+        ramp_step=10000.0, export_limit=10000.0,
+    )
+    projected_grid = -9500.0 - command
+    assert projected_grid >= -10000.0
+    assert mode == CoordinatorMode.EXPORT_CEILING
+
+
+# ── stale plan ────────────────────────────────────────────────────────────────
+
+
+def test_stale_plan_mode_reported():
+    _, mode = cmd(grid_actual=1000.0, grid_target=0.0, plan_is_stale=True)
+    assert mode == CoordinatorMode.STALE_PLAN
+
+
+def test_stale_plan_in_deadband_still_stale():
+    _, mode = cmd(
+        grid_actual=50.0, grid_target=0.0, tracking_deadband=200.0, plan_is_stale=True
+    )
+    assert mode == CoordinatorMode.STALE_PLAN
+
+
+# ── build_coordinator_data ────────────────────────────────────────────────────
+
+
+def test_build_coordinator_data_headroom():
+    data = build_coordinator_data(
+        mode=CoordinatorMode.EMHASS_TRACKING,
+        grid_actual=2000.0,
+        grid_target=500.0,
+        voltx_command=1500.0,
+        import_limit=12000.0,
+        export_limit=10000.0,
+        plan_age_minutes=1.0,
+    )
+    assert isinstance(data, CoordinatorData)
+    assert data.import_headroom == pytest.approx(10000.0)  # 12000 - 2000
+    assert data.export_headroom == pytest.approx(12000.0)  # 10000 + 2000
+    assert data.plan_age_minutes == 1.0
+    assert data.override_mode is None

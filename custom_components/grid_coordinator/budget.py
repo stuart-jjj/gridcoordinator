@@ -60,10 +60,11 @@ def compute_voltx_command(
     mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
 
     # SOC constraints (checked before inverter limits so mode is set correctly)
-    if raw_cmd < 0 and soc <= soc_min:
+    # cmd > 0 = discharge; cmd < 0 = charge
+    if raw_cmd > 0 and soc <= soc_min:
         raw_cmd = 0.0
         mode = CoordinatorMode.SOC_FLOOR
-    elif raw_cmd > 0 and soc >= soc_max:
+    elif raw_cmd < 0 and soc >= soc_max:
         raw_cmd = 0.0
         mode = CoordinatorMode.SOC_CEILING
 

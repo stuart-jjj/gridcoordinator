@@ -21,7 +21,7 @@ _SIM_PLATFORMS: list[Platform] = [Platform.NUMBER]
 _SET_MODE_SCHEMA = vol.Schema(
     {
         vol.Required("mode"): vol.In(["auto", "self_consume", "hold_soc", "force_charge", "force_export", "disabled"]),
-        vol.Optional("power_w"): vol.Coerce(float),
+        vol.Optional("power_w"): vol.All(vol.Coerce(float), vol.Range(min=0, max=20000)),
         vol.Optional("duration_minutes", default=DEFAULT_OVERRIDE_DURATION_MINUTES): vol.All(vol.Coerce(float), vol.Range(min=1, max=240)),
         vol.Optional("bypass_soc", default=False): cv.boolean,
     }
@@ -67,9 +67,9 @@ async def async_unload_entry(
 ) -> bool:
     """Unload a config entry."""
     hass.services.async_remove(DOMAIN, "set_mode")
-    return await hass.config_entries.async_unload_platforms(
-        entry, _BASE_PLATFORMS + _SIM_PLATFORMS
-    )
+    test_mode = entry.options.get(CONF_TEST_MODE, entry.data.get(CONF_TEST_MODE, False))
+    platforms = list(_BASE_PLATFORMS) + (list(_SIM_PLATFORMS) if test_mode else [])
+    return await hass.config_entries.async_unload_platforms(entry, platforms)
 
 
 async def _async_reload_entry(
