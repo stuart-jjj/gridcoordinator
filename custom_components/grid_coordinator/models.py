@@ -18,6 +18,8 @@ class CoordinatorMode(StrEnum):
     EXPORT_CEILING = "export_ceiling"   # export limit is the binding constraint
     SOC_FLOOR = "soc_floor"             # battery at min SOC, discharging suppressed
     SOC_CEILING = "soc_ceiling"         # battery at max SOC, charging suppressed
+    EV_CHARGING = "ev_charging"              # EV detected; discharge suppressed to let grid absorb load
+    LOAD_HEADROOM = "load_headroom"          # headroom reserved for monitored load; charging reduced
     # Manual override modes (set via service call or override select entity)
     OVERRIDE_SELF_CONSUME = "override_self_consume"
     OVERRIDE_HOLD_SOC = "override_hold_soc"

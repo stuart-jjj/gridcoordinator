@@ -20,6 +20,16 @@ CONF_SELF_CONSUMPTION_MODE = "self_consumption_mode"
 CONF_SELF_CONSUMPTION_DEADBAND = "self_consumption_deadband"
 CONF_TRACKING_DEADBAND = "tracking_deadband"
 
+# EV charge awareness
+CONF_ENTITY_EV_CHARGER = "entity_ev_charger"
+CONF_EV_CHARGER_THRESHOLD = "ev_charger_threshold"
+
+# Monitored load 1 headroom
+CONF_ENTITY_MON_LOAD_1 = "entity_monitored_load_1"
+CONF_MON_LOAD_1_THRESHOLD = "monitored_load_1_threshold"
+CONF_MON_LOAD_1_HEADROOM = "monitored_load_1_headroom"
+CONF_MON_LOAD_1_HOLDOFF_MINUTES = "monitored_load_1_holdoff_minutes"
+
 # Entity ID config keys
 CONF_ENTITY_GRID_POWER = "entity_grid_power"
 CONF_ENTITY_MPC_GRID_POWER = "entity_mpc_grid_power"
@@ -42,6 +52,10 @@ DEFAULT_SELF_CONSUMPTION_MODE = "Self-consumption"  # Voltx Modbus work-mode nam
 DEFAULT_SELF_CONSUMPTION_DEADBAND = 50  # W — |grid_target| below this → self-consumption
 DEFAULT_TRACKING_DEADBAND = 200         # W — hold command if grid error is within this band
 DEFAULT_OVERRIDE_DURATION_MINUTES = 60  # minutes before a manual override auto-expires
+DEFAULT_EV_CHARGER_THRESHOLD = 500      # W — above this the EV is considered charging
+DEFAULT_MON_LOAD_1_THRESHOLD = 10       # W — above this the monitored load is considered on
+DEFAULT_MON_LOAD_1_HEADROOM = 6000      # W — import headroom to reserve when load is on
+DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES = 5  # minutes load must be off before headroom is released
 
 # ── Update interval ───────────────────────────────────────────────────────────
 UPDATE_INTERVAL_SECONDS = 10
@@ -64,6 +78,10 @@ ENTITY_SOC_MAX = "number.soc_max"                                               
 
 # Enable/disable gate — reuses the existing EMHASS control helper
 ENTITY_ENABLED = "input_boolean.emhass_control_active"
+
+# Optional feature entities (production defaults; leave blank to disable the feature)
+ENTITY_EV_CHARGER = "sensor.iammeter_power_c"
+ENTITY_MON_LOAD_1 = "sensor.oven_energy_monitor_power"
 
 # Outputs — Voltx via direct Modbus integration
 ENTITY_VOLTX_CMD = "number.voltx_battery_battery_charge_discharge_power"

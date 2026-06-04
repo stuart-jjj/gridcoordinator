@@ -9,8 +9,10 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ENTITY_ENABLED,
+    CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
+    CONF_ENTITY_MON_LOAD_1,
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
     CONF_ENTITY_VOLTX_CMD,
@@ -18,8 +20,12 @@ from .const import (
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
     CONF_ENTITY_VOLTX_SOC,
     CONF_ENTITY_VOLTX_WORK_MODE,
+    CONF_EV_CHARGER_THRESHOLD,
     CONF_EXPORT_LIMIT,
     CONF_IMPORT_LIMIT,
+    CONF_MON_LOAD_1_HEADROOM,
+    CONF_MON_LOAD_1_HOLDOFF_MINUTES,
+    CONF_MON_LOAD_1_THRESHOLD,
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
@@ -27,8 +33,12 @@ from .const import (
     CONF_SELF_CONSUMPTION_MODE,
     CONF_TEST_MODE,
     CONF_TRACKING_DEADBAND,
+    DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_IMPORT_LIMIT,
+    DEFAULT_MON_LOAD_1_HEADROOM,
+    DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES,
+    DEFAULT_MON_LOAD_1_THRESHOLD,
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
@@ -36,7 +46,9 @@ from .const import (
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_TRACKING_DEADBAND,
     DOMAIN,
+    ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
+    ENTITY_MON_LOAD_1,
     SIM_ENTITY_IDS,
 )
 
@@ -78,6 +90,22 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=1000, step=50, unit_of_measurement="W", mode=_NUM,
                 )),
+            vol.Required(CONF_EV_CHARGER_THRESHOLD, default=defaults.get(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=100, max=5000, step=50, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_MON_LOAD_1_THRESHOLD, default=defaults.get(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=1, max=500, step=1, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_MON_LOAD_1_HEADROOM, default=defaults.get(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=500, max=15000, step=500, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_MON_LOAD_1_HOLDOFF_MINUTES, default=defaults.get(CONF_MON_LOAD_1_HOLDOFF_MINUTES, DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=1, max=30, step=1, unit_of_measurement="min", mode=_NUM,
+                )),
         }
     )
 
@@ -96,6 +124,8 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_ENTITY_ENABLED, default=defaults.get(CONF_ENTITY_ENABLED, ENTITY_ID_DEFAULTS[CONF_ENTITY_ENABLED])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_CMD, default=defaults.get(CONF_ENTITY_VOLTX_CMD, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_CMD])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_WORK_MODE, default=defaults.get(CONF_ENTITY_VOLTX_WORK_MODE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_WORK_MODE])): _TEXT,
+            vol.Optional(CONF_ENTITY_EV_CHARGER, default=defaults.get(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)): _TEXT,
+            vol.Optional(CONF_ENTITY_MON_LOAD_1, default=defaults.get(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)): _TEXT,
         }
     )
 
@@ -190,6 +220,10 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_SELF_CONSUMPTION_MODE: self._current(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE),
             CONF_SELF_CONSUMPTION_DEADBAND: self._current(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND),
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
+            CONF_EV_CHARGER_THRESHOLD: self._current(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD),
+            CONF_MON_LOAD_1_THRESHOLD: self._current(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD),
+            CONF_MON_LOAD_1_HEADROOM: self._current(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM),
+            CONF_MON_LOAD_1_HOLDOFF_MINUTES: self._current(CONF_MON_LOAD_1_HOLDOFF_MINUTES, DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES),
         }
         return self.async_show_form(
             step_id="init",
@@ -212,6 +246,9 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             entity_defaults = {k: self._current(k, sim_id) for k, sim_id in SIM_ENTITY_IDS.items()}
         else:
             entity_defaults = {k: self._current(k, prod_id) for k, prod_id in ENTITY_ID_DEFAULTS.items()}
+        # Optional feature entities (not in ENTITY_ID_DEFAULTS; production defaults used)
+        entity_defaults[CONF_ENTITY_EV_CHARGER] = self._current(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)
+        entity_defaults[CONF_ENTITY_MON_LOAD_1] = self._current(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)
 
         return self.async_show_form(
             step_id="entities",

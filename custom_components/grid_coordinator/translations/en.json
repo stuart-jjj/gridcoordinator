@@ -13,7 +13,11 @@
           "mpc_sign_inverted": "EMHASS mpc_grid_power positive = export to grid (invert sign)",
           "self_consumption_mode": "Self-consumption work mode name",
           "self_consumption_deadband": "Self-consumption deadband (W)",
-          "tracking_deadband": "Tracking deadband (W)"
+          "tracking_deadband": "Tracking deadband (W)",
+          "ev_charger_threshold": "EV charger detection threshold (W)",
+          "monitored_load_1_threshold": "Monitored load 1 — active threshold (W)",
+          "monitored_load_1_headroom": "Monitored load 1 — import headroom to reserve (W)",
+          "monitored_load_1_holdoff_minutes": "Monitored load 1 — headroom holdoff after power drops (min)"
         },
         "data_description": {
           "test_mode": "Creates simulated number/select/switch entities and wires them up automatically. Enable the 'Sim Enabled' switch in HA to start the control loop.",
@@ -24,7 +28,11 @@
           "mpc_sign_inverted": "EMHASS convention: positive mpc_grid_power means export to grid. Leave on unless you have confirmed your EMHASS instance uses the opposite convention.",
           "self_consumption_mode": "Exact work mode name for self-consumption on your inverter. 'Self-consumption' for Voltx Modbus; 'Self-consumption mode' for Solplanet.",
           "self_consumption_deadband": "When |grid_target| is within this band of zero, the coordinator hands off to the inverter's native self-consumption mode. Default ±50 W.",
-          "tracking_deadband": "If the grid error (actual minus target) is within this band, the battery command is held unchanged. Prevents command chatter from measurement noise and small load fluctuations. Default 200 W."
+          "tracking_deadband": "If the grid error (actual minus target) is within this band, the battery command is held unchanged. Prevents command chatter from measurement noise and small load fluctuations. Default 200 W.",
+          "ev_charger_threshold": "When the EV charger sensor exceeds this power, the battery SOC floor is raised to the current SOC + 1 % so the battery cannot discharge to compensate. Grid import absorbs the EV load naturally up to the import limit. Default 500 W.",
+          "monitored_load_1_threshold": "When this load sensor exceeds the threshold, headroom is reserved on the grid import. Default 10 W.",
+          "monitored_load_1_headroom": "Import headroom (W) to keep available when the monitored load is active. Battery charging is reduced to maintain this margin. Default 6000 W.",
+          "monitored_load_1_holdoff_minutes": "How long the load must read below its threshold before headroom is released. Prevents rapid cycling for spikey loads. Default 5 min."
         }
       },
       "entities": {
@@ -40,7 +48,9 @@
           "entity_soc_max": "SOC maximum limit (%)",
           "entity_enabled": "Enable/disable gate (input_boolean or switch)",
           "entity_voltx_cmd": "Battery charge/discharge command (number entity)",
-          "entity_voltx_work_mode": "Inverter work mode (select entity)"
+          "entity_voltx_work_mode": "Inverter work mode (select entity)",
+          "entity_ev_charger": "EV charger power sensor (optional)",
+          "entity_monitored_load_1": "Monitored load 1 power sensor (optional)"
         },
         "data_description": {
           "entity_grid_power": "Positive = importing from grid. E.g. sensor.iammeter_power_a",
@@ -52,7 +62,9 @@
           "entity_soc_max": "Above this SOC the controller will not discharge the battery.",
           "entity_enabled": "When off, the coordinator is dormant and leaves the inverter untouched.",
           "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
-          "entity_voltx_work_mode": "Must support the 'Custom' option."
+          "entity_voltx_work_mode": "Must support the 'Custom' option.",
+          "entity_ev_charger": "Power sensor for the EV charger circuit. Leave blank to disable EV charge awareness.",
+          "entity_monitored_load_1": "Power sensor for a large transient load (e.g. oven). Leave blank to disable headroom reservation."
         }
       }
     },
@@ -74,7 +86,11 @@
           "mpc_sign_inverted": "EMHASS mpc_grid_power positive = export to grid (invert sign)",
           "self_consumption_mode": "Self-consumption work mode name",
           "self_consumption_deadband": "Self-consumption deadband (W)",
-          "tracking_deadband": "Tracking deadband (W)"
+          "tracking_deadband": "Tracking deadband (W)",
+          "ev_charger_threshold": "EV charger detection threshold (W)",
+          "monitored_load_1_threshold": "Monitored load 1 — active threshold (W)",
+          "monitored_load_1_headroom": "Monitored load 1 — import headroom to reserve (W)",
+          "monitored_load_1_holdoff_minutes": "Monitored load 1 — headroom holdoff after power drops (min)"
         },
         "data_description": {
           "test_mode": "When enabled, simulated entities are created for all signals. Disabling removes them on next reload.",
@@ -83,7 +99,11 @@
           "ramp_step": "Maximum change in battery command per tick.",
           "plan_stale_minutes": "Minutes before the EMHASS plan is considered stale.",
           "mpc_sign_inverted": "Leave on for standard EMHASS injection convention.",
-          "tracking_deadband": "Hold the battery command when the grid error is within this band. Reduces Modbus writes and prevents oscillation from measurement noise."
+          "tracking_deadband": "Hold the battery command when the grid error is within this band. Reduces Modbus writes and prevents oscillation from measurement noise.",
+          "ev_charger_threshold": "Battery discharge suppressed when EV charger exceeds this power.",
+          "monitored_load_1_threshold": "Headroom reserved when monitored load exceeds this power.",
+          "monitored_load_1_headroom": "Import headroom (W) kept available when load is active.",
+          "monitored_load_1_holdoff_minutes": "Minutes load must be off before headroom is released."
         }
       },
       "entities": {
@@ -99,7 +119,9 @@
           "entity_soc_max": "SOC maximum limit (%)",
           "entity_enabled": "Enable/disable gate",
           "entity_voltx_cmd": "Battery charge/discharge command",
-          "entity_voltx_work_mode": "Inverter work mode"
+          "entity_voltx_work_mode": "Inverter work mode",
+          "entity_ev_charger": "EV charger power sensor (optional)",
+          "entity_monitored_load_1": "Monitored load 1 power sensor (optional)"
         },
         "data_description": {
           "entity_grid_power": "Positive = importing from grid.",
@@ -111,7 +133,9 @@
           "entity_soc_max": "Above this SOC the controller will not discharge.",
           "entity_enabled": "When off, the coordinator is dormant.",
           "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
-          "entity_voltx_work_mode": "Must support the 'Custom' option."
+          "entity_voltx_work_mode": "Must support the 'Custom' option.",
+          "entity_ev_charger": "Leave blank to disable EV charge awareness.",
+          "entity_monitored_load_1": "Leave blank to disable headroom reservation."
         }
       }
     }

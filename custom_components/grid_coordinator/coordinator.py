@@ -12,8 +12,10 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .budget import build_coordinator_data, compute_voltx_command
 from .const import (
     CONF_ENTITY_ENABLED,
+    CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
+    CONF_ENTITY_MON_LOAD_1,
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
     CONF_ENTITY_VOLTX_CMD,
@@ -21,16 +23,24 @@ from .const import (
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
     CONF_ENTITY_VOLTX_SOC,
     CONF_ENTITY_VOLTX_WORK_MODE,
+    CONF_EV_CHARGER_THRESHOLD,
     CONF_EXPORT_LIMIT,
     CONF_IMPORT_LIMIT,
+    CONF_MON_LOAD_1_HEADROOM,
+    CONF_MON_LOAD_1_HOLDOFF_MINUTES,
+    CONF_MON_LOAD_1_THRESHOLD,
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_TRACKING_DEADBAND,
+    DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_IMPORT_LIMIT,
+    DEFAULT_MON_LOAD_1_HEADROOM,
+    DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES,
+    DEFAULT_MON_LOAD_1_THRESHOLD,
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
@@ -39,7 +49,9 @@ from .const import (
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_TRACKING_DEADBAND,
     DOMAIN,
+    ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
+    ENTITY_MON_LOAD_1,
     LOGGER,
     UPDATE_INTERVAL_SECONDS,
     VOLTX_WORK_MODE_CUSTOM,
@@ -99,6 +111,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._override_power: float | None = None
         self._override_bypass_soc: bool = False
         self._override_expires: datetime | None = None
+        # Monitored load 1 — headroom reservation state
+        self._mon_load_1_active: bool = False
+        self._mon_load_1_below_since: datetime | None = None
         super().__init__(
             hass=hass,
             logger=LOGGER,
@@ -149,6 +164,50 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @property
     def _tracking_deadband(self) -> float:
         return float(self._opt(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND))
+
+    # ── feature helpers ───────────────────────────────────────────────────────
+
+    def _ev_adjusted_soc_min(self, hass: HomeAssistant, soc: float, soc_min: float) -> tuple[float, bool]:
+        """Return (effective_soc_min, ev_active).
+
+        When the EV charger draws above threshold the SOC floor is raised to
+        soc + 1 % so the battery cannot discharge to compensate.  Grid import
+        absorbs the EV load naturally up to the configured import limit.
+        """
+        entity = str(self._opt(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER))
+        if not entity:
+            return soc_min, False
+        threshold = float(self._opt(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD))
+        ev_power = _float(hass, entity, 0.0)
+        if ev_power > threshold:
+            return max(soc_min, soc + 1.0), True
+        return soc_min, False
+
+    def _headroom_reserve(self, hass: HomeAssistant) -> float:
+        """Return the import headroom (W) to reserve for monitored load 1.
+
+        Headroom is activated as soon as the load exceeds its threshold and is
+        held for the configured holdoff period after power drops back below it.
+        """
+        entity = str(self._opt(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1))
+        if not entity:
+            return 0.0
+        threshold = float(self._opt(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD))
+        headroom = float(self._opt(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM))
+        holdoff_min = float(self._opt(CONF_MON_LOAD_1_HOLDOFF_MINUTES, DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES))
+
+        power = _float(hass, entity, 0.0)
+        if power > threshold:
+            self._mon_load_1_active = True
+            self._mon_load_1_below_since = None
+        elif self._mon_load_1_active:
+            if self._mon_load_1_below_since is None:
+                self._mon_load_1_below_since = datetime.now(UTC)
+            elif (datetime.now(UTC) - self._mon_load_1_below_since).total_seconds() / 60 >= holdoff_min:
+                self._mon_load_1_active = False
+                self._mon_load_1_below_since = None
+
+        return headroom if self._mon_load_1_active else 0.0
 
     # ── override control ──────────────────────────────────────────────────────
 
@@ -278,13 +337,19 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         max_charge = _float(hass, entity_max_charge, 5000.0)
         max_discharge = _float(hass, entity_max_discharge, 5000.0)
 
+        # ── EV charge awareness ────────────────────────────────────────────
+        effective_soc_min, ev_active = self._ev_adjusted_soc_min(hass, soc, soc_min)
+
+        # ── monitored load headroom ────────────────────────────────────────
+        headroom_reserve = self._headroom_reserve(hass)
+
         # ── compute command (pure function, no HA calls) ───────────────────
         command, mode = compute_voltx_command(
             grid_actual=grid_actual,
             grid_target=effective_target,
             prev_cmd=self._prev_cmd,
             soc=soc,
-            soc_min=soc_min,
+            soc_min=effective_soc_min,
             soc_max=soc_max,
             max_charge=max_charge,
             max_discharge=max_discharge,
@@ -293,20 +358,27 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             ramp_step=self._ramp_step,
             plan_is_stale=plan_is_stale,
             tracking_deadband=self._tracking_deadband,
+            headroom_reserve=headroom_reserve,
         )
+
+        # Remap SOC_FLOOR to EV_CHARGING when the elevated floor was EV-caused.
+        if ev_active and mode == CoordinatorMode.SOC_FLOOR and soc > soc_min:
+            mode = CoordinatorMode.EV_CHARGING
 
         # ── write to inverter ──────────────────────────────────────────────
         await self._async_write_voltx(command)
         self._prev_cmd = command
 
         LOGGER.debug(
-            "tick | grid=%.0fW target=%.0fW cmd=%.0fW soc=%.0f%% mode=%s age=%.1fmin",
+            "tick | grid=%.0fW target=%.0fW cmd=%.0fW soc=%.0f%% mode=%s age=%.1fmin ev=%s headroom=%.0fW",
             grid_actual,
             grid_target,
             command,
             soc,
             mode,
             plan_age,
+            ev_active,
+            headroom_reserve,
         )
 
         return build_coordinator_data(

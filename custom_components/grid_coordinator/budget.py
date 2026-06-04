@@ -20,6 +20,7 @@ def compute_voltx_command(
     ramp_step: float,
     plan_is_stale: bool,
     tracking_deadband: float = 0.0,
+    headroom_reserve: float = 0.0,
 ) -> tuple[float, CoordinatorMode]:
     """Compute the Voltx battery command for one 10 s tick.
 
@@ -40,17 +41,24 @@ def compute_voltx_command(
       ⟹  cmd_floor = P_uncontrolled − import_limit
           cmd_ceil  = P_uncontrolled + export_limit
 
+    headroom_reserve tightens the effective import limit so that the specified
+    number of watts remains available for transient loads (e.g. oven spike).
+
     Returns (command_W rounded to int, active_mode).
     """
     # Tracking deadband — hold the current command when the grid error is small.
     # Prevents command chatter from measurement noise and small load fluctuations.
     # Grid safety limits are not re-evaluated here; prev_cmd was already safe.
-    if abs(grid_actual - grid_target) <= tracking_deadband:
+    # Skip the early return when headroom is active: the oven may have just turned on
+    # and the charging floor must be enforced even if the grid error is within the band.
+    if abs(grid_actual - grid_target) <= tracking_deadband and headroom_reserve == 0:
         mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
         return round(prev_cmd), mode
 
     uncontrolled = grid_actual + prev_cmd
-    cmd_floor = uncontrolled - import_limit
+    # Tighten the import floor by headroom_reserve so charging is reduced to keep
+    # import capacity available for transient loads (e.g. oven spike).
+    cmd_floor = uncontrolled - (import_limit - headroom_reserve)
     cmd_ceil = uncontrolled + export_limit
 
     # Pure-I controller: close the grid error in one step.
@@ -79,7 +87,7 @@ def compute_voltx_command(
     final_cmd = max(cmd_floor, min(cmd_ceil, ramped_cmd))
 
     if final_cmd > ramped_cmd + 1:
-        mode = CoordinatorMode.IMPORT_CEILING
+        mode = CoordinatorMode.LOAD_HEADROOM if headroom_reserve > 0 else CoordinatorMode.IMPORT_CEILING
     elif final_cmd < ramped_cmd - 1:
         mode = CoordinatorMode.EXPORT_CEILING
 
