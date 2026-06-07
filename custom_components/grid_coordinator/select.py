@@ -9,7 +9,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import CONF_TEST_MODE, DOMAIN
 from .entity import GridCoordinatorEntity
-from .simulated import SimWorkModeSelect
+from .simulated import SimSolaxRcPowerControlSelect, SimWorkModeSelect
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -74,5 +74,6 @@ async def async_setup_entry(
     test_mode = entry.options.get(CONF_TEST_MODE, entry.data.get(CONF_TEST_MODE, False))
     if test_mode:
         entities.append(SimWorkModeSelect(entry.entry_id))
+        entities.append(SimSolaxRcPowerControlSelect(entry.entry_id))
 
     async_add_entities(entities)

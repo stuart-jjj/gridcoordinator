@@ -4,9 +4,10 @@ import pytest
 
 from custom_components.grid_coordinator.budget import (
     build_coordinator_data,
+    compute_solax_command,
     compute_voltx_command,
 )
-from custom_components.grid_coordinator.models import CoordinatorData, CoordinatorMode
+from custom_components.grid_coordinator.models import CoordinatorData, CoordinatorMode, SolaxMode
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
@@ -218,6 +219,128 @@ def test_stale_plan_in_deadband_still_stale():
         grid_actual=50.0, grid_target=0.0, tracking_deadband=200.0, plan_is_stale=True
     )
     assert mode == CoordinatorMode.STALE_PLAN
+
+
+# ── build_coordinator_data ────────────────────────────────────────────────────
+
+
+# ── compute_solax_command ─────────────────────────────────────────────────────
+
+_SOLAX = dict(
+    grid_after_voltx=0.0,
+    grid_target=0.0,
+    solax_soc=50.0,
+    solax_soc_min=20.0,
+    solax_soc_max=95.0,
+    solax_max_charge=2400.0,
+    solax_max_discharge=2400.0,
+    import_limit=12000.0,
+    export_limit=10000.0,
+)
+
+
+def solax(**overrides) -> tuple[float, SolaxMode]:
+    return compute_solax_command(**{**_SOLAX, **overrides})
+
+
+def test_solax_inactive_for_normal_tracking():
+    cmd, mode = solax(voltx_mode=CoordinatorMode.EMHASS_TRACKING)
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
+def test_solax_inactive_for_self_consumption():
+    cmd, mode = solax(voltx_mode=CoordinatorMode.SELF_CONSUMPTION)
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
+def test_solax_discharges_on_soc_floor_with_residual():
+    """Voltx at SOC floor + grid above target → Solax discharges the delta."""
+    # Voltx can't discharge (SOC floor); grid_after_voltx = 5000, target = 2000
+    # residual = 5000 - 2000 = 3000 → capped at max_discharge=2400
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=5000.0,
+        grid_target=2000.0,
+    )
+    assert cmd == 2400.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+def test_solax_discharges_exact_residual_within_limit():
+    """Residual below max_discharge → exact residual is commanded."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=3000.0,
+        grid_target=2000.0,
+    )
+    assert cmd == 1000.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+def test_solax_charges_on_soc_ceiling_with_residual():
+    """Voltx at SOC ceiling + grid below target → Solax charges the delta."""
+    # grid_after_voltx = -2000 (exporting), target = 0 → residual = -2000 - 0 = -2000 (charge)
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_CEILING,
+        grid_after_voltx=-2000.0,
+        grid_target=0.0,
+    )
+    assert cmd == -2000.0
+    assert mode == SolaxMode.FORCE_CHARGE
+
+
+def test_solax_inactive_when_no_residual():
+    """Voltx at SOC floor but grid already at target → Solax stays idle."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=2000.0,
+        grid_target=2000.0,
+    )
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
+def test_solax_soc_floor_blocks_discharge():
+    """Solax SOC at floor → discharge suppressed even though residual exists."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=5000.0,
+        grid_target=2000.0,
+        solax_soc=20.0,
+        solax_soc_min=20.0,
+    )
+    assert cmd == 0.0
+    assert mode == SolaxMode.SOC_FLOOR
+
+
+def test_solax_soc_ceiling_blocks_charge():
+    """Solax SOC at ceiling → charge suppressed even though residual exists."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_CEILING,
+        grid_after_voltx=-2000.0,
+        grid_target=0.0,
+        solax_soc=95.0,
+        solax_soc_max=95.0,
+    )
+    assert cmd == 0.0
+    assert mode == SolaxMode.SOC_CEILING
+
+
+def test_solax_discharge_clamped_by_export_limit():
+    """Discharging Solax must not push grid past the export limit."""
+    # grid_after_voltx = -9500 (exporting), target = -11000 (wants more export)
+    # residual = -9500 - (-11000) = 1500 (discharge) but grid_limit_ceil = -9500 + 10000 = 500
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=-9500.0,
+        grid_target=-11000.0,
+        export_limit=10000.0,
+    )
+    projected = -9500.0 - cmd
+    assert projected >= -10000.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
 
 
 # ── build_coordinator_data ────────────────────────────────────────────────────

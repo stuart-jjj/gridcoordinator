@@ -90,7 +90,47 @@ ENTITY_VOLTX_CMD = "number.voltx_battery_battery_charge_discharge_power"
 ENTITY_VOLTX_WORK_MODE = "select.voltx_inverter_work_mode"
 VOLTX_WORK_MODE_CUSTOM = "Custom"
 
+# ── Solax entity ID config keys ───────────────────────────────────────────────
+CONF_ENTITY_SOLAX_SOC = "entity_solax_soc"
+CONF_ENTITY_SOLAX_SOC_MIN = "entity_solax_soc_min"
+CONF_ENTITY_SOLAX_SOC_MAX = "entity_solax_soc_max"
+CONF_ENTITY_SOLAX_RC_POWER_CONTROL = "entity_solax_rc_power_control"
+CONF_ENTITY_SOLAX_RC_ACTIVE_POWER = "entity_solax_rc_active_power"
+CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION = "entity_solax_rc_autorepeat_duration"
+CONF_ENTITY_SOLAX_RC_TRIGGER = "entity_solax_rc_trigger"
+
+# ── Solax parameter config keys ────────────────────────────────────────────────
+CONF_SOLAX_MAX_CHARGE = "solax_max_charge"
+CONF_SOLAX_MAX_DISCHARGE = "solax_max_discharge"
+
+# ── Solax defaults ─────────────────────────────────────────────────────────────
+DEFAULT_SOLAX_MAX_CHARGE = 2400        # W — X1 AC G3 hardware limit
+DEFAULT_SOLAX_MAX_DISCHARGE = 2400     # W
+DEFAULT_SOLAX_AUTOREPEAT_DURATION = 20 # s — 2× the 10 s tick; hardware expires in 4 s
+
+# Remote-control power mode names (as reported by homeassistant-solax-modbus)
+SOLAX_RC_MODE_ENABLED = "Enabled Power Control"
+SOLAX_RC_MODE_DISABLED = "Disabled"
+
+# ── Solax production entity IDs ────────────────────────────────────────────────
+# Hub name "solax" — must match the name configured in the Solax Modbus integration.
+ENTITY_SOLAX_SOC = "sensor.solax_battery_capacity"
+ENTITY_SOLAX_SOC_MIN = "number.solax_selfuse_discharge_min_soc"
+ENTITY_SOLAX_SOC_MAX = "number.solax_battery_charge_upper_soc"
+ENTITY_SOLAX_RC_POWER_CONTROL = "select.solax_remotecontrol_power_control"
+ENTITY_SOLAX_RC_ACTIVE_POWER = "number.solax_remotecontrol_active_power"
+ENTITY_SOLAX_RC_AUTOREPEAT_DURATION = "number.solax_remotecontrol_autorepeat_duration"
+ENTITY_SOLAX_RC_TRIGGER = "button.solax_remotecontrol_trigger_gen3"
+
 # ── Simulated entity IDs (created in testing mode) ────────────────────────────
+SIM_ENTITY_SOLAX_SOC = "number.grid_coordinator_sim_solax_soc"
+SIM_ENTITY_SOLAX_SOC_MIN = "number.grid_coordinator_sim_solax_soc_min"
+SIM_ENTITY_SOLAX_SOC_MAX = "number.grid_coordinator_sim_solax_soc_max"
+SIM_ENTITY_SOLAX_RC_POWER_CONTROL = "select.grid_coordinator_sim_solax_rc_power_control"
+SIM_ENTITY_SOLAX_RC_ACTIVE_POWER = "number.grid_coordinator_sim_solax_rc_active_power"
+SIM_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION = "number.grid_coordinator_sim_solax_rc_autorepeat_duration"
+SIM_ENTITY_SOLAX_RC_TRIGGER = "button.grid_coordinator_sim_solax_rc_trigger"
+
 SIM_ENTITY_GRID_POWER = "number.grid_coordinator_sim_grid_power"
 SIM_ENTITY_MPC_GRID_POWER = "number.grid_coordinator_sim_mpc_grid_power"
 SIM_ENTITY_VOLTX_SOC = "number.grid_coordinator_sim_battery_soc"
@@ -104,6 +144,7 @@ SIM_ENTITY_VOLTX_WORK_MODE = "select.grid_coordinator_sim_work_mode"
 
 # Maps config key → production default entity ID
 ENTITY_ID_DEFAULTS: dict[str, str] = {
+    # Voltx + grid
     CONF_ENTITY_GRID_POWER: ENTITY_GRID_POWER,
     CONF_ENTITY_MPC_GRID_POWER: ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_VOLTX_SOC: ENTITY_VOLTX_SOC,
@@ -114,10 +155,19 @@ ENTITY_ID_DEFAULTS: dict[str, str] = {
     CONF_ENTITY_ENABLED: ENTITY_ENABLED,
     CONF_ENTITY_VOLTX_CMD: ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_WORK_MODE: ENTITY_VOLTX_WORK_MODE,
+    # Solax
+    CONF_ENTITY_SOLAX_SOC: ENTITY_SOLAX_SOC,
+    CONF_ENTITY_SOLAX_SOC_MIN: ENTITY_SOLAX_SOC_MIN,
+    CONF_ENTITY_SOLAX_SOC_MAX: ENTITY_SOLAX_SOC_MAX,
+    CONF_ENTITY_SOLAX_RC_POWER_CONTROL: ENTITY_SOLAX_RC_POWER_CONTROL,
+    CONF_ENTITY_SOLAX_RC_ACTIVE_POWER: ENTITY_SOLAX_RC_ACTIVE_POWER,
+    CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION: ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
+    CONF_ENTITY_SOLAX_RC_TRIGGER: ENTITY_SOLAX_RC_TRIGGER,
 }
 
 # Maps config key → simulated entity ID
 SIM_ENTITY_IDS: dict[str, str] = {
+    # Voltx + grid
     CONF_ENTITY_GRID_POWER: SIM_ENTITY_GRID_POWER,
     CONF_ENTITY_MPC_GRID_POWER: SIM_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_VOLTX_SOC: SIM_ENTITY_VOLTX_SOC,
@@ -128,4 +178,12 @@ SIM_ENTITY_IDS: dict[str, str] = {
     CONF_ENTITY_ENABLED: SIM_ENTITY_ENABLED,
     CONF_ENTITY_VOLTX_CMD: SIM_ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_WORK_MODE: SIM_ENTITY_VOLTX_WORK_MODE,
+    # Solax
+    CONF_ENTITY_SOLAX_SOC: SIM_ENTITY_SOLAX_SOC,
+    CONF_ENTITY_SOLAX_SOC_MIN: SIM_ENTITY_SOLAX_SOC_MIN,
+    CONF_ENTITY_SOLAX_SOC_MAX: SIM_ENTITY_SOLAX_SOC_MAX,
+    CONF_ENTITY_SOLAX_RC_POWER_CONTROL: SIM_ENTITY_SOLAX_RC_POWER_CONTROL,
+    CONF_ENTITY_SOLAX_RC_ACTIVE_POWER: SIM_ENTITY_SOLAX_RC_ACTIVE_POWER,
+    CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION: SIM_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
+    CONF_ENTITY_SOLAX_RC_TRIGGER: SIM_ENTITY_SOLAX_RC_TRIGGER,
 }

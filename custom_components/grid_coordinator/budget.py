@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .models import CoordinatorData, CoordinatorMode
+from .models import CoordinatorData, CoordinatorMode, SolaxMode
 
 
 def compute_voltx_command(
@@ -99,6 +99,62 @@ def compute_voltx_command(
     return round(final_cmd), mode
 
 
+def compute_solax_command(
+    *,
+    voltx_mode: CoordinatorMode,
+    grid_after_voltx: float,
+    grid_target: float,
+    solax_soc: float,
+    solax_soc_min: float,
+    solax_soc_max: float,
+    solax_max_charge: float,
+    solax_max_discharge: float,
+    import_limit: float,
+    export_limit: float,
+) -> tuple[float, SolaxMode]:
+    """Compute the Solax priority-2 battery command for one 10 s tick.
+
+    Only activates when Voltx is at a SOC boundary (SOC_FLOOR or SOC_CEILING) and
+    there is a residual tracking error Voltx cannot cover.
+
+    Sign convention: same as voltx_command — positive = discharge, negative = charge.
+    grid_after_voltx: projected grid power after Voltx command is applied,
+                      i.e. (grid_actual + prev_voltx_cmd) − voltx_cmd.
+    """
+    if voltx_mode not in (CoordinatorMode.SOC_FLOOR, CoordinatorMode.SOC_CEILING):
+        return 0.0, SolaxMode.SELF_CONSUMPTION
+
+    # Hard grid-safety bounds for Solax, accounting for Voltx already applied.
+    # Grid equation: P_grid = grid_after_voltx − solax_cmd
+    # → cmd must stay in [grid_after_voltx − import_limit, grid_after_voltx + export_limit]
+    grid_limit_floor = grid_after_voltx - import_limit
+    grid_limit_ceil = grid_after_voltx + export_limit
+
+    # Residual error: additional discharge (+) or charge (−) needed after Voltx
+    raw_cmd = grid_after_voltx - grid_target
+
+    # SOC constraints
+    if raw_cmd > 0 and solax_soc <= solax_soc_min:
+        return 0.0, SolaxMode.SOC_FLOOR
+    if raw_cmd < 0 and solax_soc >= solax_soc_max:
+        return 0.0, SolaxMode.SOC_CEILING
+
+    # Physical limits
+    raw_cmd = max(-solax_max_charge, min(solax_max_discharge, raw_cmd))
+
+    # Hard grid-safety clamp
+    final_cmd = max(grid_limit_floor, min(grid_limit_ceil, raw_cmd))
+
+    if final_cmd > 0:
+        mode = SolaxMode.FORCE_DISCHARGE
+    elif final_cmd < 0:
+        mode = SolaxMode.FORCE_CHARGE
+    else:
+        mode = SolaxMode.SELF_CONSUMPTION
+
+    return float(round(final_cmd)), mode
+
+
 def build_coordinator_data(
     *,
     mode: CoordinatorMode,
@@ -109,6 +165,8 @@ def build_coordinator_data(
     export_limit: float,
     plan_age_minutes: float,
     override_mode: str | None = None,
+    solax_command: float = 0.0,
+    solax_mode: SolaxMode = SolaxMode.SELF_CONSUMPTION,
 ) -> CoordinatorData:
     """Construct CoordinatorData with derived headroom fields."""
     return CoordinatorData(
@@ -120,4 +178,6 @@ def build_coordinator_data(
         export_headroom=export_limit + grid_actual,
         plan_age_minutes=round(plan_age_minutes, 1),
         override_mode=override_mode,
+        solax_command=solax_command,
+        solax_mode=solax_mode,
     )
