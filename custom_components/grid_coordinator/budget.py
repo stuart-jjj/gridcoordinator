@@ -67,9 +67,12 @@ def compute_voltx_command(
         # Report the binding SOC constraint even in deadband so Solax knows Voltx is bounded.
         # Without this, Solax successfully brings grid near target → deadband fires →
         # mode=emhass_tracking → Solax released → grid shoots up again (2-tick oscillation).
-        if soc <= soc_min:
+        # Guard with prev_cmd direction: only propagate SOC_FLOOR when Voltx was already
+        # zeroed/discharging (prev_cmd >= 0). If Voltx is actively charging (prev_cmd < 0)
+        # the SOC floor is not the binding constraint and Solax should stay idle.
+        if soc <= soc_min and prev_cmd >= 0:
             mode = CoordinatorMode.SOC_FLOOR
-        elif soc >= soc_max:
+        elif soc >= soc_max and prev_cmd <= 0:
             mode = CoordinatorMode.SOC_CEILING
         else:
             mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
