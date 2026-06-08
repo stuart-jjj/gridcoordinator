@@ -14,6 +14,7 @@ from .const import (
     CONF_ENTITY_ENABLED,
     CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
+    CONF_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_MON_LOAD_1,
     CONF_ENTITY_SOC_MAX,
@@ -36,6 +37,7 @@ from .const import (
     CONF_MON_LOAD_1_HEADROOM,
     CONF_MON_LOAD_1_HOLDOFF_MINUTES,
     CONF_MON_LOAD_1_THRESHOLD,
+    CONF_MPC_BATT_SIGN_INVERTED,
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
@@ -50,6 +52,7 @@ from .const import (
     DEFAULT_MON_LOAD_1_HEADROOM,
     DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES,
     DEFAULT_MON_LOAD_1_THRESHOLD,
+    DEFAULT_MPC_BATT_SIGN_INVERTED,
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
@@ -316,19 +319,25 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_age = _plan_age_minutes(hass, entity_mpc)
             return await self._async_handle_override(grid_actual, plan_age)
 
-        # ── read EMHASS setpoint ───────────────────────────────────────────
+        # ── read EMHASS setpoints ──────────────────────────────────────────
         plan_age = _plan_age_minutes(hass, entity_mpc)
         mpc_raw = _float(hass, entity_mpc, 0.0)
-        # Correct for EMHASS injection convention if needed so that both
-        # grid_actual and grid_target share the "positive = import" basis.
         grid_target = -mpc_raw if self._mpc_sign_inverted else mpc_raw
+
+        mpc_batt_raw = _float(hass, self._eid(CONF_ENTITY_MPC_BATT_POWER), 0.0)
+        mpc_batt_sign_inv = bool(self._opt(CONF_MPC_BATT_SIGN_INVERTED, DEFAULT_MPC_BATT_SIGN_INVERTED))
+        mpc_batt_cmd = -mpc_batt_raw if mpc_batt_sign_inv else mpc_batt_raw
+
         plan_is_stale = plan_age > self._stale_minutes
 
         # ── self-consumption deadband check ───────────────────────────────
         # When the effective target is within the deadband of zero, hand off to
         # the inverter's native self-consumption mode which reacts at firmware
         # speed. prev_cmd is reset to 0 so the ramp starts clean on exit.
+        # Both the grid target and battery setpoint are zeroed for a stale plan
+        # so neither leaks into the controller if the deadband is ever set to 0.
         effective_target = grid_target if not plan_is_stale else 0.0
+        effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
         if abs(effective_target) <= self._self_consumption_deadband:
             await self._async_enter_self_consumption()
             if self._solax_enabled() and self._solax_active:
@@ -367,6 +376,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         command, mode = compute_voltx_command(
             grid_actual=grid_actual,
             grid_target=effective_target,
+            mpc_batt_cmd=effective_mpc_batt,
             prev_cmd=self._prev_cmd,
             soc=soc,
             soc_min=effective_soc_min,
@@ -416,10 +426,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
 
         LOGGER.debug(
-            "tick | grid=%.0fW target=%.0fW cmd=%.0fW soc=%.0f%% mode=%s age=%.1fmin "
-            "ev=%s headroom=%.0fW solax_cmd=%.0fW solax_mode=%s",
+            "tick | grid=%.0fW target=%.0fW batt_cmd=%.0fW cmd=%.0fW soc=%.0f%% mode=%s "
+            "age=%.1fmin ev=%s headroom=%.0fW solax_cmd=%.0fW solax_mode=%s",
             grid_actual,
             grid_target,
+            effective_mpc_batt,
             command,
             soc,
             mode,
@@ -439,6 +450,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             export_limit=self._export_limit,
             plan_age_minutes=plan_age,
             override_mode=None,
+            mpc_batt_power=effective_mpc_batt,
             solax_command=solax_cmd,
             solax_mode=solax_mode,
         )

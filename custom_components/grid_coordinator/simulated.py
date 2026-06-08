@@ -16,6 +16,7 @@ from .const import (
     DOMAIN,
     SIM_ENTITY_ENABLED,
     SIM_ENTITY_GRID_POWER,
+    SIM_ENTITY_MPC_BATT_POWER,
     SIM_ENTITY_MPC_GRID_POWER,
     SIM_ENTITY_SOC_MAX,
     SIM_ENTITY_SOC_MIN,
@@ -190,6 +191,14 @@ def build_sim_number_entities(entry_id: str) -> list[SimNumberEntity]:
             min_val=-20000, max_val=20000, step=10,
             unit="W", default=0.0,
             icon="mdi:chart-timeline-variant",
+        ),
+        SimNumberEntity(
+            entry_id=entry_id,
+            name="Sim MPC Battery Power",
+            fixed_entity_id=SIM_ENTITY_MPC_BATT_POWER,
+            min_val=-10000, max_val=10000, step=10,
+            unit="W", default=0.0,
+            icon="mdi:battery-charging",
         ),
         SimNumberEntity(
             entry_id=entry_id,

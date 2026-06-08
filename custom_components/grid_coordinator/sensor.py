@@ -40,6 +40,15 @@ SENSOR_DESCRIPTIONS: tuple[GridSensorDescription, ...] = (
         value_fn=lambda d: str(d.mode),
     ),
     GridSensorDescription(
+        key="mpc_batt_power",
+        name="MPC Battery Power",
+        icon="mdi:battery-arrow-up",
+        device_class=SensorDeviceClass.POWER,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfPower.WATT,
+        value_fn=lambda d: d.mpc_batt_power,
+    ),
+    GridSensorDescription(
         key="grid_target",
         name="Grid Target",
         icon="mdi:transmission-tower",

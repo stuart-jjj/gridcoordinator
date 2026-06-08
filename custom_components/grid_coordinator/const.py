@@ -12,9 +12,9 @@ CONF_IMPORT_LIMIT = "import_limit"
 CONF_EXPORT_LIMIT = "export_limit"
 CONF_RAMP_STEP = "ramp_step"
 CONF_PLAN_STALE_MINUTES = "plan_stale_minutes"
-# EMHASS mpc_grid_power uses injection convention (positive = export to grid),
-# opposite to IAMMeter (positive = import from grid). Set True to negate it.
 CONF_MPC_SIGN_INVERTED = "mpc_sign_inverted"
+CONF_MPC_BATT_SIGN_INVERTED = "mpc_batt_sign_inverted"
+CONF_ENTITY_MPC_BATT_POWER = "entity_mpc_batt_power"
 CONF_TEST_MODE = "test_mode"
 CONF_SELF_CONSUMPTION_MODE = "self_consumption_mode"
 CONF_SELF_CONSUMPTION_DEADBAND = "self_consumption_deadband"
@@ -47,7 +47,8 @@ DEFAULT_IMPORT_LIMIT = 12000        # W — safe single-phase limit
 DEFAULT_EXPORT_LIMIT = 10000        # W — network export rule
 DEFAULT_RAMP_STEP = 1500            # W per 10 s tick
 DEFAULT_PLAN_STALE_MINUTES = 20     # minutes before plan treated as stale
-DEFAULT_MPC_SIGN_INVERTED = True    # EMHASS default: positive = export to grid
+DEFAULT_MPC_SIGN_INVERTED = False   # positive = import (matches grid sensor convention)
+DEFAULT_MPC_BATT_SIGN_INVERTED = False  # positive = discharge (matches coordinator convention)
 DEFAULT_SELF_CONSUMPTION_MODE = "Self-consumption"  # Voltx Modbus work-mode name
 DEFAULT_SELF_CONSUMPTION_DEADBAND = 50  # W — |grid_target| below this → self-consumption
 DEFAULT_TRACKING_DEADBAND = 200         # W — hold command if grid error is within this band
@@ -66,9 +67,11 @@ ENTITY_GRID_POWER = "sensor.iammeter_power_a"
 # Convention: positive = import from grid, negative = export to grid
 
 ENTITY_MPC_GRID_POWER = "sensor.mpc_grid_power"
-# EMHASS output. Default: positive = export to grid (injection convention).
-# Negated internally when CONF_MPC_SIGN_INVERTED is True so both are
-# on the same "positive = import" basis for the PI controller.
+# EMHASS output — positive = import from grid (same as grid sensor).
+# Set CONF_MPC_SIGN_INVERTED=True if your EMHASS uses injection convention (positive = export).
+
+ENTITY_MPC_BATT_POWER = "sensor.mpc_battery_power"
+# EMHASS output — positive = discharging (same as voltx_command convention).
 
 ENTITY_VOLTX_SOC = "sensor.battery_state_of_charge"                            # %
 ENTITY_VOLTX_MAX_CHARGE = "input_number.voltx_battery_max_charging_limit"      # W
@@ -133,6 +136,7 @@ SIM_ENTITY_SOLAX_RC_TRIGGER = "button.grid_coordinator_sim_solax_rc_trigger"
 
 SIM_ENTITY_GRID_POWER = "number.grid_coordinator_sim_grid_power"
 SIM_ENTITY_MPC_GRID_POWER = "number.grid_coordinator_sim_mpc_grid_power"
+SIM_ENTITY_MPC_BATT_POWER = "number.grid_coordinator_sim_mpc_batt_power"
 SIM_ENTITY_VOLTX_SOC = "number.grid_coordinator_sim_battery_soc"
 SIM_ENTITY_VOLTX_MAX_CHARGE = "number.grid_coordinator_sim_max_charge"
 SIM_ENTITY_VOLTX_MAX_DISCHARGE = "number.grid_coordinator_sim_max_discharge"
@@ -147,6 +151,7 @@ ENTITY_ID_DEFAULTS: dict[str, str] = {
     # Voltx + grid
     CONF_ENTITY_GRID_POWER: ENTITY_GRID_POWER,
     CONF_ENTITY_MPC_GRID_POWER: ENTITY_MPC_GRID_POWER,
+    CONF_ENTITY_MPC_BATT_POWER: ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_VOLTX_SOC: ENTITY_VOLTX_SOC,
     CONF_ENTITY_VOLTX_MAX_CHARGE: ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE: ENTITY_VOLTX_MAX_DISCHARGE,
@@ -170,6 +175,7 @@ SIM_ENTITY_IDS: dict[str, str] = {
     # Voltx + grid
     CONF_ENTITY_GRID_POWER: SIM_ENTITY_GRID_POWER,
     CONF_ENTITY_MPC_GRID_POWER: SIM_ENTITY_MPC_GRID_POWER,
+    CONF_ENTITY_MPC_BATT_POWER: SIM_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_VOLTX_SOC: SIM_ENTITY_VOLTX_SOC,
     CONF_ENTITY_VOLTX_MAX_CHARGE: SIM_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE: SIM_ENTITY_VOLTX_MAX_DISCHARGE,

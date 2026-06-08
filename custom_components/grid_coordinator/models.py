@@ -50,5 +50,6 @@ class CoordinatorData:
     export_headroom: float   # W remaining before export limit is reached
     plan_age_minutes: float  # minutes since mpc_grid_power was last updated
     override_mode: str | None = None  # active override key; None when following EMHASS normally
+    mpc_batt_power: float = 0.0        # W — EMHASS battery setpoint used this tick (positive = discharge)
     solax_command: float = 0.0          # W sent to Solax; positive = discharge, negative = charge
     solax_mode: SolaxMode = SolaxMode.SELF_CONSUMPTION  # Solax operating mode this tick

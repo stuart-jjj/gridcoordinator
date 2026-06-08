@@ -14,6 +14,7 @@ from custom_components.grid_coordinator.models import CoordinatorData, Coordinat
 _DEFAULTS = dict(
     grid_actual=0.0,
     grid_target=0.0,
+    mpc_batt_cmd=0.0,
     prev_cmd=0.0,
     soc=50.0,
     soc_min=20.0,
@@ -36,9 +37,9 @@ def cmd(**overrides) -> tuple[float, CoordinatorMode]:
 
 
 def test_closes_error_in_one_step():
-    """PI controller closes a grid error in one step when unconstrained."""
+    """2-tier controller closes grid error when mpc_batt_cmd is zero."""
     command, mode = cmd(grid_actual=2000.0, grid_target=500.0)
-    # error = 2000 - 500 = 1500 → prev_cmd=0 + 1500 = 1500 W discharge
+    # mpc_batt_cmd=0 + correction=(2000-500)=1500 → 1500 W discharge
     assert command == 1500
     assert mode == CoordinatorMode.EMHASS_TRACKING
 
@@ -46,8 +47,54 @@ def test_closes_error_in_one_step():
 def test_negative_error_charges():
     """When grid is below target (e.g. exporting too much), command goes negative."""
     command, mode = cmd(grid_actual=-500.0, grid_target=0.0, prev_cmd=0.0)
-    # error = -500 → cmd = 0 + (-500) = -500 W (charge)
+    # mpc_batt_cmd=0 + correction=(-500-0)=-500 → -500 W (charge)
     assert command == -500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+# ── 2-tier: mpc_batt_cmd as primary signal ────────────────────────────────────
+
+
+def test_executes_mpc_batt_cmd_directly():
+    """When forecast is accurate (grid_actual == grid_target), correction is zero."""
+    command, mode = cmd(
+        mpc_batt_cmd=2000.0, grid_actual=1000.0, grid_target=1000.0
+    )
+    # correction = 1000 - 1000 = 0 → raw_cmd = 2000 + 0 = 2000
+    assert command == 2000
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_correction_added_to_mpc_batt_cmd():
+    """When actual grid deviates from forecast, correction is added to mpc_batt_cmd."""
+    command, mode = cmd(
+        mpc_batt_cmd=1000.0, grid_actual=1500.0, grid_target=1000.0,
+        ramp_step=5000.0,
+    )
+    # raw_cmd = 1000 + (1500 - 1000) = 1500
+    assert command == 1500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_mpc_batt_cmd_negative_charges():
+    """Negative mpc_batt_cmd (EMHASS wants to charge) with no grid error."""
+    command, mode = cmd(
+        mpc_batt_cmd=-2000.0, grid_actual=500.0, grid_target=500.0,
+        ramp_step=5000.0,
+    )
+    # raw_cmd = -2000 + 0 = -2000 (charge)
+    assert command == -2000
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_correction_opposes_mpc_batt_cmd():
+    """Correction term can partially cancel mpc_batt_cmd when actual < target."""
+    command, mode = cmd(
+        mpc_batt_cmd=2000.0, grid_actual=500.0, grid_target=1000.0,
+        ramp_step=5000.0,
+    )
+    # raw_cmd = 2000 + (500 - 1000) = 2000 - 500 = 1500
+    assert command == 1500
     assert mode == CoordinatorMode.EMHASS_TRACKING
 
 

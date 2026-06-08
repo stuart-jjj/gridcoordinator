@@ -9,6 +9,7 @@ def compute_voltx_command(
     *,
     grid_actual: float,
     grid_target: float,
+    mpc_batt_cmd: float,
     prev_cmd: float,
     soc: float,
     soc_min: float,
@@ -26,15 +27,26 @@ def compute_voltx_command(
 
     Sign conventions (all Watts):
       grid_actual / grid_target : positive = import from grid, negative = export
-      voltx command             : positive = discharge (reduces import / raises export)
+      mpc_batt_cmd / voltx cmd  : positive = discharge (reduces import / raises export)
                                   negative = charge   (raises import / reduces export)
 
-    The grid relationship is:
-      P_grid = P_uncontrolled − P_voltx_cmd
-    where P_uncontrolled = house loads − solar (approximately constant between ticks).
+    Two-tier control:
+      Tier 1 — EMHASS battery setpoint (mpc_batt_cmd): executes the LP decision variable
+               directly, exactly what the optimiser solved for.
+      Tier 2 — Grid correction (grid_actual − grid_target): proportional adjustment for
+               the gap between EMHASS forecast and actual conditions this tick.
 
-    Estimating uncontrolled from the previous tick:
-      P_uncontrolled ≈ grid_actual + prev_cmd
+      raw_cmd = mpc_batt_cmd + (grid_actual − grid_target)
+
+    When the forecast is accurate (grid_actual ≈ grid_target), correction → 0 and the
+    battery tracks mpc_batt_cmd exactly.  When load or solar deviates from the LP
+    forecast, the correction term restores grid balance without waiting for the next
+    5-minute EMHASS re-solve.  No integral wind-up: the anchor resets to the EMHASS
+    plan each tick rather than accumulating prev_cmd.
+
+    prev_cmd is still used for:
+      - Estimating uncontrolled power: P_uncontrolled ≈ grid_actual + prev_cmd
+      - Ramp limiting: smooth transitions between ticks
 
     Hard grid limit bounds on the new command:
       projected_grid = P_uncontrolled − new_cmd  must stay in [−export_limit, +import_limit]
@@ -61,9 +73,8 @@ def compute_voltx_command(
     cmd_floor = uncontrolled - (import_limit - headroom_reserve)
     cmd_ceil = uncontrolled + export_limit
 
-    # Pure-I controller: close the grid error in one step.
-    # Positive error (importing more than target) → increase discharge (raise cmd).
-    raw_cmd = prev_cmd + (grid_actual - grid_target)
+    # Two-tier: EMHASS battery setpoint + proportional grid correction.
+    raw_cmd = mpc_batt_cmd + (grid_actual - grid_target)
 
     mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
 
@@ -165,6 +176,7 @@ def build_coordinator_data(
     export_limit: float,
     plan_age_minutes: float,
     override_mode: str | None = None,
+    mpc_batt_power: float = 0.0,
     solax_command: float = 0.0,
     solax_mode: SolaxMode = SolaxMode.SELF_CONSUMPTION,
 ) -> CoordinatorData:
@@ -178,6 +190,7 @@ def build_coordinator_data(
         export_headroom=export_limit + grid_actual,
         plan_age_minutes=round(plan_age_minutes, 1),
         override_mode=override_mode,
+        mpc_batt_power=mpc_batt_power,
         solax_command=solax_command,
         solax_mode=solax_mode,
     )
