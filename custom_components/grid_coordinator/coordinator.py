@@ -487,6 +487,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
 
         # hold_soc / force_charge / force_export — need battery state
+        # Solax is not commanded in these override modes; release it if previously active.
+        if self._solax_enabled() and self._solax_active:
+            await self._async_enter_solax_self_consumption()
+
         soc = _float(hass, self._eid(CONF_ENTITY_VOLTX_SOC), 50.0)
         soc_min = _float(hass, self._eid(CONF_ENTITY_SOC_MIN), 20.0)
         soc_max = _float(hass, self._eid(CONF_ENTITY_SOC_MAX), 95.0)
@@ -526,6 +530,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 cmd = 0.0
             else:
                 cmd = min(target, cmd_ceil)
+                cmd = max(cmd_floor, cmd)   # import safety: prevent excess import if target < residual
                 cmd = min(max_discharge, cmd)
             coord_mode = CoordinatorMode.OVERRIDE_FORCE_EXPORT
 
@@ -605,21 +610,25 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     async def _async_enter_solax_self_consumption(self) -> None:
         """Release Solax back to its native self-consumption mode."""
-        async with asyncio.timeout(5):
-            await self.hass.services.async_call(
-                "select", "select_option",
-                {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL),
-                 "option": SOLAX_RC_MODE_DISABLED},
-                blocking=True,
-            )
-        async with asyncio.timeout(5):
-            await self.hass.services.async_call(
-                "button", "press",
-                {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_TRIGGER)},
-                blocking=True,
-            )
-        self._solax_active = False
-        LOGGER.debug("solax: released to self-consumption")
+        try:
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "select", "select_option",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL),
+                     "option": SOLAX_RC_MODE_DISABLED},
+                    blocking=True,
+                )
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "button", "press",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_TRIGGER)},
+                    blocking=True,
+                )
+            LOGGER.debug("solax: released to self-consumption")
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("Solax release failed: %s", err)
+        finally:
+            self._solax_active = False
 
     # ── inverter write ────────────────────────────────────────────────────────
 
