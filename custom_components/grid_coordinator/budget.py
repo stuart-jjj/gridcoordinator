@@ -64,7 +64,15 @@ def compute_voltx_command(
     # Skip the early return when headroom is active: the oven may have just turned on
     # and the charging floor must be enforced even if the grid error is within the band.
     if abs(grid_actual - grid_target) <= tracking_deadband and headroom_reserve == 0:
-        mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
+        # Report the binding SOC constraint even in deadband so Solax knows Voltx is bounded.
+        # Without this, Solax successfully brings grid near target → deadband fires →
+        # mode=emhass_tracking → Solax released → grid shoots up again (2-tick oscillation).
+        if soc <= soc_min:
+            mode = CoordinatorMode.SOC_FLOOR
+        elif soc >= soc_max:
+            mode = CoordinatorMode.SOC_CEILING
+        else:
+            mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
         return round(prev_cmd), mode
 
     uncontrolled = grid_actual + prev_cmd
