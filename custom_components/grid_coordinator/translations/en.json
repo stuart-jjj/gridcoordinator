@@ -76,8 +76,8 @@
         "description": "Entity IDs for the Solax inverter remote-control interface (via homeassistant-solax-modbus). Leave **Solax SOC sensor** blank to disable Solax coordination entirely.",
         "data": {
           "entity_solax_soc": "Solax battery SOC sensor (optional)",
-          "entity_solax_soc_min": "Solax SOC minimum limit entity",
-          "entity_solax_soc_max": "Solax SOC maximum limit entity",
+          "entity_solax_soc_min": "Solax SOC minimum limit (entity or fixed value)",
+          "entity_solax_soc_max": "Solax SOC maximum limit (entity or fixed value)",
           "entity_solax_rc_power_control": "Remote control power mode (select entity)",
           "entity_solax_rc_active_power": "Remote control active power setpoint (number entity)",
           "entity_solax_rc_autorepeat_duration": "Remote control autorepeat duration (number entity)",
@@ -85,8 +85,8 @@
         },
         "data_description": {
           "entity_solax_soc": "E.g. sensor.solax_battery_capacity. Leave blank to disable Solax coordination.",
-          "entity_solax_soc_min": "Solax will not discharge below this SOC. E.g. number.solax_selfuse_discharge_min_soc",
-          "entity_solax_soc_max": "Solax will not charge above this SOC. E.g. number.solax_battery_charge_upper_soc",
+          "entity_solax_soc_min": "Solax will not discharge below this SOC. Enter an entity ID (e.g. number.solax_selfuse_discharge_min_soc) or a fixed integer (e.g. 20).",
+          "entity_solax_soc_max": "Solax will not charge above this SOC. Enter an entity ID (e.g. number.solax_battery_charge_upper_soc) or a fixed integer (e.g. 95).",
           "entity_solax_rc_power_control": "Select entity with 'Disabled' / 'Enabled Power Control' options. E.g. select.solax_remotecontrol_power_control",
           "entity_solax_rc_active_power": "Signed power setpoint in W. Solax convention: negative = discharge. E.g. number.solax_remotecontrol_active_power",
           "entity_solax_rc_autorepeat_duration": "Seconds the command stays active before the inverter reverts. E.g. number.solax_remotecontrol_autorepeat_duration",
@@ -177,8 +177,8 @@
         "description": "Entity IDs for the Solax remote-control interface. Leave **Solax SOC sensor** blank to disable Solax coordination.",
         "data": {
           "entity_solax_soc": "Solax battery SOC sensor (optional)",
-          "entity_solax_soc_min": "Solax SOC minimum limit entity",
-          "entity_solax_soc_max": "Solax SOC maximum limit entity",
+          "entity_solax_soc_min": "Solax SOC minimum limit (entity or fixed value)",
+          "entity_solax_soc_max": "Solax SOC maximum limit (entity or fixed value)",
           "entity_solax_rc_power_control": "Remote control power mode (select entity)",
           "entity_solax_rc_active_power": "Remote control active power setpoint (number entity)",
           "entity_solax_rc_autorepeat_duration": "Remote control autorepeat duration (number entity)",
@@ -186,8 +186,8 @@
         },
         "data_description": {
           "entity_solax_soc": "E.g. sensor.solax_battery_capacity. Leave blank to disable Solax coordination.",
-          "entity_solax_soc_min": "Solax will not discharge below this SOC.",
-          "entity_solax_soc_max": "Solax will not charge above this SOC.",
+          "entity_solax_soc_min": "Solax will not discharge below this SOC. Enter an entity ID or a fixed integer (e.g. 20).",
+          "entity_solax_soc_max": "Solax will not charge above this SOC. Enter an entity ID or a fixed integer (e.g. 95).",
           "entity_solax_rc_power_control": "Select entity: 'Disabled' / 'Enabled Power Control'.",
           "entity_solax_rc_active_power": "Signed power setpoint (negative = discharge in Solax convention).",
           "entity_solax_rc_autorepeat_duration": "Seconds the command stays active before the inverter reverts.",

@@ -93,6 +93,14 @@ def _float(hass: HomeAssistant, entity_id: str, default: float) -> float:
         return default
 
 
+def _float_or_entity(hass: HomeAssistant, entity_id_or_value: str, default: float) -> float:
+    """Return the value directly if the string is numeric, otherwise read as an entity state."""
+    try:
+        return float(entity_id_or_value)
+    except (ValueError, TypeError):
+        return _float(hass, entity_id_or_value, default)
+
+
 def _str(hass: HomeAssistant, entity_id: str, default: str = "") -> str:
     state = hass.states.get(entity_id)
     return state.state if state else default
@@ -405,8 +413,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # ── Solax priority-2 command ───────────────────────────────────────
         if self._solax_enabled():
             solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
-            solax_soc_min = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
-            solax_soc_max = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
+            solax_soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
+            solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
             solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
             solax_cmd, solax_mode = compute_solax_command(
@@ -611,6 +619,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     async def _async_enter_solax_self_consumption(self) -> None:
         """Release Solax back to its native self-consumption mode."""
         try:
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "number", "set_value",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER), "value": "0"},
+                    blocking=True,
+                )
             async with asyncio.timeout(5):
                 await self.hass.services.async_call(
                     "select", "select_option",
