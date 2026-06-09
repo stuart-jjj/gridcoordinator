@@ -16,7 +16,7 @@ from .data import GridCoordinatorConfigEntry
 # In test mode, NUMBER is added for the simulated input/output number entities.
 # SimEnabledSwitch is also in the switch platform and created only in test mode.
 _BASE_PLATFORMS: list[Platform] = [Platform.SENSOR, Platform.SWITCH, Platform.SELECT]
-_SIM_PLATFORMS: list[Platform] = [Platform.NUMBER]
+_SIM_PLATFORMS: list[Platform] = [Platform.NUMBER, Platform.BUTTON]
 
 _SET_MODE_SCHEMA = vol.Schema(
     {

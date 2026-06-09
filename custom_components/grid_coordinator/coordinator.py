@@ -9,15 +9,23 @@ from typing import TYPE_CHECKING
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .budget import build_coordinator_data, compute_voltx_command
+from .budget import build_coordinator_data, compute_solax_command, compute_voltx_command
 from .const import (
     CONF_ENTITY_ENABLED,
     CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
+    CONF_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_MON_LOAD_1,
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
+    CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
+    CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
+    CONF_ENTITY_SOLAX_RC_POWER_CONTROL,
+    CONF_ENTITY_SOLAX_RC_TRIGGER,
+    CONF_ENTITY_SOLAX_SOC,
+    CONF_ENTITY_SOLAX_SOC_MAX,
+    CONF_ENTITY_SOLAX_SOC_MIN,
     CONF_ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
@@ -29,11 +37,15 @@ from .const import (
     CONF_MON_LOAD_1_HEADROOM,
     CONF_MON_LOAD_1_HOLDOFF_MINUTES,
     CONF_MON_LOAD_1_THRESHOLD,
+    CONF_MPC_BATT_SIGN_INVERTED,
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
+    CONF_SOLAX_CMD_DEADBAND,
+    CONF_SOLAX_MAX_CHARGE,
+    CONF_SOLAX_MAX_DISCHARGE,
     CONF_TRACKING_DEADBAND,
     DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
@@ -41,22 +53,29 @@ from .const import (
     DEFAULT_MON_LOAD_1_HEADROOM,
     DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES,
     DEFAULT_MON_LOAD_1_THRESHOLD,
+    DEFAULT_MPC_BATT_SIGN_INVERTED,
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
+    DEFAULT_SOLAX_AUTOREPEAT_DURATION,
+    DEFAULT_SOLAX_CMD_DEADBAND,
+    DEFAULT_SOLAX_MAX_CHARGE,
+    DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TRACKING_DEADBAND,
     DOMAIN,
     ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
     ENTITY_MON_LOAD_1,
     LOGGER,
+    SOLAX_RC_MODE_DISABLED,
+    SOLAX_RC_MODE_ENABLED,
     UPDATE_INTERVAL_SECONDS,
     VOLTX_WORK_MODE_CUSTOM,
 )
-from .models import CoordinatorData, CoordinatorMode
+from .models import CoordinatorData, CoordinatorMode, SolaxMode
 
 if TYPE_CHECKING:
     from .data import GridCoordinatorConfigEntry
@@ -74,6 +93,14 @@ def _float(hass: HomeAssistant, entity_id: str, default: float) -> float:
         return float(state.state)
     except (ValueError, TypeError):
         return default
+
+
+def _float_or_entity(hass: HomeAssistant, entity_id_or_value: str, default: float) -> float:
+    """Return the value directly if the string is numeric, otherwise read as an entity state."""
+    try:
+        return float(entity_id_or_value)
+    except (ValueError, TypeError):
+        return _float(hass, entity_id_or_value, default)
 
 
 def _str(hass: HomeAssistant, entity_id: str, default: str = "") -> str:
@@ -114,6 +141,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Monitored load 1 — headroom reservation state
         self._mon_load_1_active: bool = False
         self._mon_load_1_below_since: datetime | None = None
+        # Solax priority-2 state
+        self._solax_active: bool = False  # True when coordinator is commanding Solax
+        self._solax_last_written_cmd: float = 0.0  # last power setpoint written to inverter
         super().__init__(
             hass=hass,
             logger=LOGGER,
@@ -269,6 +299,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # ── disabled gate ──────────────────────────────────────────────────
         if _str(hass, entity_enabled, "off") != "on":
             await self._async_enter_self_consumption()
+            if self._solax_enabled() and self._solax_active:
+                await self._async_enter_solax_self_consumption()
             self._prev_cmd = 0.0
             return build_coordinator_data(
                 mode=CoordinatorMode.DISABLED,
@@ -298,21 +330,29 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_age = _plan_age_minutes(hass, entity_mpc)
             return await self._async_handle_override(grid_actual, plan_age)
 
-        # ── read EMHASS setpoint ───────────────────────────────────────────
+        # ── read EMHASS setpoints ──────────────────────────────────────────
         plan_age = _plan_age_minutes(hass, entity_mpc)
         mpc_raw = _float(hass, entity_mpc, 0.0)
-        # Correct for EMHASS injection convention if needed so that both
-        # grid_actual and grid_target share the "positive = import" basis.
         grid_target = -mpc_raw if self._mpc_sign_inverted else mpc_raw
+
+        mpc_batt_raw = _float(hass, self._eid(CONF_ENTITY_MPC_BATT_POWER), 0.0)
+        mpc_batt_sign_inv = bool(self._opt(CONF_MPC_BATT_SIGN_INVERTED, DEFAULT_MPC_BATT_SIGN_INVERTED))
+        mpc_batt_cmd = -mpc_batt_raw if mpc_batt_sign_inv else mpc_batt_raw
+
         plan_is_stale = plan_age > self._stale_minutes
 
         # ── self-consumption deadband check ───────────────────────────────
         # When the effective target is within the deadband of zero, hand off to
         # the inverter's native self-consumption mode which reacts at firmware
         # speed. prev_cmd is reset to 0 so the ramp starts clean on exit.
+        # Both the grid target and battery setpoint are zeroed for a stale plan
+        # so neither leaks into the controller if the deadband is ever set to 0.
         effective_target = grid_target if not plan_is_stale else 0.0
+        effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
         if abs(effective_target) <= self._self_consumption_deadband:
             await self._async_enter_self_consumption()
+            if self._solax_enabled() and self._solax_active:
+                await self._async_enter_solax_self_consumption()
             self._prev_cmd = 0.0
             sc_mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
             LOGGER.debug(
@@ -347,6 +387,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         command, mode = compute_voltx_command(
             grid_actual=grid_actual,
             grid_target=effective_target,
+            mpc_batt_cmd=effective_mpc_batt,
             prev_cmd=self._prev_cmd,
             soc=soc,
             soc_min=effective_soc_min,
@@ -365,20 +406,51 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if ev_active and mode == CoordinatorMode.SOC_FLOOR and soc > soc_min:
             mode = CoordinatorMode.EV_CHARGING
 
-        # ── write to inverter ──────────────────────────────────────────────
+        # ── write to Voltx ────────────────────────────────────────────────
+        # Compute grid_after_voltx before updating prev_cmd so the Solax
+        # calculation uses the same uncontrolled estimate as budget.py did.
+        grid_after_voltx = grid_actual + self._prev_cmd - command
         await self._async_write_voltx(command)
         self._prev_cmd = command
 
+        # ── Solax priority-2 command ───────────────────────────────────────
+        if self._solax_enabled():
+            solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
+            solax_soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
+            solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
+            solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
+            solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
+            solax_cmd, solax_mode = compute_solax_command(
+                voltx_mode=mode,
+                grid_after_voltx=grid_after_voltx,
+                grid_target=effective_target,
+                solax_soc=solax_soc,
+                solax_soc_min=solax_soc_min,
+                solax_soc_max=solax_soc_max,
+                solax_max_charge=solax_max_charge,
+                solax_max_discharge=solax_max_discharge,
+                import_limit=self._import_limit,
+                export_limit=self._export_limit,
+                prev_solax_cmd=self._solax_last_written_cmd,
+            )
+            await self._async_write_solax(solax_cmd)
+        else:
+            solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
+
         LOGGER.debug(
-            "tick | grid=%.0fW target=%.0fW cmd=%.0fW soc=%.0f%% mode=%s age=%.1fmin ev=%s headroom=%.0fW",
+            "tick | grid=%.0fW target=%.0fW batt_cmd=%.0fW cmd=%.0fW soc=%.0f%% mode=%s "
+            "age=%.1fmin ev=%s headroom=%.0fW solax_cmd=%.0fW solax_mode=%s",
             grid_actual,
             grid_target,
+            effective_mpc_batt,
             command,
             soc,
             mode,
             plan_age,
             ev_active,
             headroom_reserve,
+            solax_cmd,
+            solax_mode,
         )
 
         return build_coordinator_data(
@@ -390,6 +462,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             export_limit=self._export_limit,
             plan_age_minutes=plan_age,
             override_mode=None,
+            mpc_batt_power=effective_mpc_batt,
+            solax_command=solax_cmd,
+            solax_mode=solax_mode,
         )
 
     # ── override dispatch ─────────────────────────────────────────────────────
@@ -403,6 +478,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         if mode_str in ("disabled", "self_consume"):
             await self._async_enter_self_consumption()
+            if self._solax_enabled() and self._solax_active:
+                await self._async_enter_solax_self_consumption()
             self._prev_cmd = 0.0
             coord_mode = (
                 CoordinatorMode.OVERRIDE_DISABLED
@@ -422,6 +499,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
 
         # hold_soc / force_charge / force_export — need battery state
+        # Solax is not commanded in these override modes; release it if previously active.
+        if self._solax_enabled() and self._solax_active:
+            await self._async_enter_solax_self_consumption()
+
         soc = _float(hass, self._eid(CONF_ENTITY_VOLTX_SOC), 50.0)
         soc_min = _float(hass, self._eid(CONF_ENTITY_SOC_MIN), 20.0)
         soc_max = _float(hass, self._eid(CONF_ENTITY_SOC_MAX), 95.0)
@@ -461,6 +542,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 cmd = 0.0
             else:
                 cmd = min(target, cmd_ceil)
+                cmd = max(cmd_floor, cmd)   # import safety: prevent excess import if target < residual
                 cmd = min(max_discharge, cmd)
             coord_mode = CoordinatorMode.OVERRIDE_FORCE_EXPORT
 
@@ -482,6 +564,103 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_age_minutes=plan_age,
             override_mode=mode_str,
         )
+
+    # ── Solax helpers ─────────────────────────────────────────────────────────
+
+def _solax_enabled(self) -> bool:
+    """Return True when a Solax SOC entity is explicitly configured."""
+    return bool(str(self._opt(CONF_ENTITY_SOLAX_SOC, "")).strip())
+
+    async def _async_write_solax(self, command: float) -> None:
+        """Command Solax at the given power or release it to self-consumption.
+
+        command > 0 = discharge, < 0 = charge, 0 = return to self-consumption.
+        Solax convention for remotecontrol_active_power is inverted: negative = discharge.
+
+        Command deadband: only update the power setpoint when the new command differs
+        from the last written value by more than CONF_SOLAX_CMD_DEADBAND watts. The
+        autorepeat trigger is always pressed to keep the inverter in remote-control mode.
+        """
+        want_active = command != 0.0
+        deadband = float(self._opt(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND))
+        try:
+            if want_active:
+                entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
+                rc_enabled = _str(self.hass, entity_rc) == SOLAX_RC_MODE_ENABLED
+                setpoint_changed = (
+                    not self._solax_active
+                    or not rc_enabled
+                    or abs(command - self._solax_last_written_cmd) >= deadband
+                )
+                if setpoint_changed and not rc_enabled:
+                    async with asyncio.timeout(5):
+                        await self.hass.services.async_call(
+                            "select", "select_option",
+                            {"entity_id": entity_rc, "option": SOLAX_RC_MODE_ENABLED},
+                            blocking=True,
+                        )
+                if setpoint_changed:
+                    # Set active power (negate: Solax negative = discharge)
+                    async with asyncio.timeout(5):
+                        await self.hass.services.async_call(
+                            "number", "set_value",
+                            {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER),
+                             "value": str(int(-command))},
+                            blocking=True,
+                        )
+                    # Set autorepeat duration so command survives between coordinator ticks
+                    async with asyncio.timeout(5):
+                        await self.hass.services.async_call(
+                            "number", "set_value",
+                            {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION),
+                             "value": str(DEFAULT_SOLAX_AUTOREPEAT_DURATION)},
+                            blocking=True,
+                        )
+                    self._solax_last_written_cmd = command
+                    LOGGER.debug("solax: command=%.0fW (rc_active_power=%.0f)", command, -command)
+                # Always press trigger to keep the autorepeat alive, even within deadband
+                async with asyncio.timeout(5):
+                    await self.hass.services.async_call(
+                        "button", "press",
+                        {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_TRIGGER)},
+                        blocking=True,
+                    )
+                self._solax_active = True
+            elif self._solax_active:
+                await self._async_enter_solax_self_consumption()
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("Solax write failed: %s", err)
+            self._solax_active = False
+            self._solax_last_written_cmd = 0.0
+
+    async def _async_enter_solax_self_consumption(self) -> None:
+        """Release Solax back to its native self-consumption mode."""
+        try:
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "number", "set_value",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER), "value": "0"},
+                    blocking=True,
+                )
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "select", "select_option",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL),
+                     "option": SOLAX_RC_MODE_DISABLED},
+                    blocking=True,
+                )
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "button", "press",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_TRIGGER)},
+                    blocking=True,
+                )
+            LOGGER.debug("solax: released to self-consumption")
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("Solax release failed: %s", err)
+        finally:
+            self._solax_active = False
+            self._solax_last_written_cmd = 0.0
 
     # ── inverter write ────────────────────────────────────────────────────────
 
