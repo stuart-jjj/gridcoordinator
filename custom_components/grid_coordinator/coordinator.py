@@ -585,20 +585,21 @@ def _solax_enabled(self) -> bool:
         deadband = float(self._opt(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND))
         try:
             if want_active:
+                entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
+                rc_enabled = _str(self.hass, entity_rc) == SOLAX_RC_MODE_ENABLED
                 setpoint_changed = (
                     not self._solax_active
+                    or not rc_enabled
                     or abs(command - self._solax_last_written_cmd) >= deadband
                 )
+                if setpoint_changed and not rc_enabled:
+                    async with asyncio.timeout(5):
+                        await self.hass.services.async_call(
+                            "select", "select_option",
+                            {"entity_id": entity_rc, "option": SOLAX_RC_MODE_ENABLED},
+                            blocking=True,
+                        )
                 if setpoint_changed:
-                    # Ensure power control mode is "Enabled Power Control"
-                    entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
-                    if _str(self.hass, entity_rc) != SOLAX_RC_MODE_ENABLED:
-                        async with asyncio.timeout(5):
-                            await self.hass.services.async_call(
-                                "select", "select_option",
-                                {"entity_id": entity_rc, "option": SOLAX_RC_MODE_ENABLED},
-                                blocking=True,
-                            )
                     # Set active power (negate: Solax negative = discharge)
                     async with asyncio.timeout(5):
                         await self.hass.services.async_call(
