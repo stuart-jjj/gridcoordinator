@@ -1,7 +1,6 @@
-1. Settings → Helpers — you should see all the input_number sliders and the input_boolean appear automatically from
-  YAML (no need to create them manually).
-  2. Toggle input_boolean.emhass_control_active to ON — this exits the disabled gate.
-  3. The coordinator should immediately start running and the Mode sensor should change from disabled.
+1. Settings → Helpers — you should see all the input_number sliders and the input_boolean appear automatically from YAML (no need to create them manually).
+2. Toggle input_boolean.emhass_control_active to ON — this exits the disabled gate.
+3. The coordinator should immediately start running and the Mode sensor should change from disabled.
 
   Testing workflow:
   - Slide Stub Grid Power to simulate grid import/export (e.g. +2000 W = importing 2 kW)
