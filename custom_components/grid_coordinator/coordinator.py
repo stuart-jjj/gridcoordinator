@@ -431,6 +431,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 solax_max_discharge=solax_max_discharge,
                 import_limit=self._import_limit,
                 export_limit=self._export_limit,
+                prev_solax_cmd=self._solax_last_written_cmd,
             )
             await self._async_write_solax(solax_cmd)
         else:

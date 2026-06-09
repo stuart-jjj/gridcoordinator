@@ -133,6 +133,7 @@ def compute_solax_command(
     solax_max_discharge: float,
     import_limit: float,
     export_limit: float,
+    prev_solax_cmd: float = 0.0,
 ) -> tuple[float, SolaxMode]:
     """Compute the Solax priority-2 battery command for one 10 s tick.
 
@@ -142,18 +143,26 @@ def compute_solax_command(
     Sign convention: same as voltx_command — positive = discharge, negative = charge.
     grid_after_voltx: projected grid power after Voltx command is applied,
                       i.e. (grid_actual + prev_voltx_cmd) − voltx_cmd.
+                      The grid sensor is net of all generation including Solax, so
+                      prev_solax_cmd is added back to get the Solax-free baseline
+                      before computing raw_cmd — analogous to how Voltx uses prev_cmd.
     """
     if voltx_mode not in (CoordinatorMode.SOC_FLOOR, CoordinatorMode.SOC_CEILING):
         return 0.0, SolaxMode.SELF_CONSUMPTION
 
-    # Hard grid-safety bounds for Solax, accounting for Voltx already applied.
-    # Grid equation: P_grid = grid_after_voltx − solax_cmd
-    # → cmd must stay in [grid_after_voltx − import_limit, grid_after_voltx + export_limit]
-    grid_limit_floor = grid_after_voltx - import_limit
-    grid_limit_ceil = grid_after_voltx + export_limit
+    # Undo the current Solax contribution so raw_cmd represents the full residual.
+    # Without this the controller only corrects the margin above the running Solax
+    # output and converges to half the needed correction.
+    grid_without_solax = grid_after_voltx + prev_solax_cmd
 
-    # Residual error: additional discharge (+) or charge (−) needed after Voltx
-    raw_cmd = grid_after_voltx - grid_target
+    # Hard grid-safety bounds for Solax.
+    # Grid equation: P_grid = grid_without_solax − solax_cmd
+    # → cmd must stay in [grid_without_solax − import_limit, grid_without_solax + export_limit]
+    grid_limit_floor = grid_without_solax - import_limit
+    grid_limit_ceil = grid_without_solax + export_limit
+
+    # Residual error: discharge (+) or charge (−) needed to bring grid to target
+    raw_cmd = grid_without_solax - grid_target
 
     # SOC constraints
     if raw_cmd > 0 and solax_soc <= solax_soc_min:
