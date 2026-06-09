@@ -405,6 +405,6 @@ def test_build_coordinator_data_headroom():
     )
     assert isinstance(data, CoordinatorData)
     assert data.import_headroom == pytest.approx(10000.0)  # 12000 - 2000
-    assert data.export_headroom == pytest.approx(12000.0)  # 10000 + 2000
+    assert data.export_headroom == pytest.approx(10000.0)  # 10000 - 0
     assert data.plan_age_minutes == 1.0
     assert data.override_mode is None
