@@ -33,8 +33,7 @@
   - Mode stays emhass_tracking
   - Import Headroom stays at 10 000 W (grid power unchanged — in the sim, you're controlling both sides independently)
 
-  What it verifies: EMHASS setpoint is read and sign-corrected; the integrating controller accumulates error
-  correctly.
+  What it verifies: EMHASS setpoint is read and sign-corrected; the 2-tier controller applies the grid-error correction and ramp limiting as expected.
 
   ---
   Test 3 — Enable/disable gate
