@@ -631,6 +631,7 @@ def _solax_enabled(self) -> bool:
         except Exception as err:  # noqa: BLE001
             LOGGER.warning("Solax write failed: %s", err)
             self._solax_active = False
+            self._solax_last_written_cmd = 0.0
 
     async def _async_enter_solax_self_consumption(self) -> None:
         """Release Solax back to its native self-consumption mode."""
