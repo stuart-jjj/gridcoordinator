@@ -105,11 +105,13 @@ CONF_ENTITY_SOLAX_RC_TRIGGER = "entity_solax_rc_trigger"
 # ── Solax parameter config keys ────────────────────────────────────────────────
 CONF_SOLAX_MAX_CHARGE = "solax_max_charge"
 CONF_SOLAX_MAX_DISCHARGE = "solax_max_discharge"
+CONF_SOLAX_CMD_DEADBAND = "solax_cmd_deadband"
 
 # ── Solax defaults ─────────────────────────────────────────────────────────────
 DEFAULT_SOLAX_MAX_CHARGE = 2400        # W — X1 AC G3 hardware limit
 DEFAULT_SOLAX_MAX_DISCHARGE = 2400     # W
 DEFAULT_SOLAX_AUTOREPEAT_DURATION = 20 # s — 2× the 10 s tick; hardware expires in 4 s
+DEFAULT_SOLAX_CMD_DEADBAND = 50        # W — suppress command updates smaller than this
 
 # Remote-control power mode names (as reported by homeassistant-solax-modbus)
 SOLAX_RC_MODE_ENABLED = "Enabled Power Control"

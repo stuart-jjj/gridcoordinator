@@ -119,7 +119,8 @@
           "monitored_load_1_headroom": "Monitored load 1 — import headroom to reserve (W)",
           "monitored_load_1_holdoff_minutes": "Monitored load 1 — headroom holdoff after power drops (min)",
           "solax_max_charge": "Solax max charge power (W)",
-          "solax_max_discharge": "Solax max discharge power (W)"
+          "solax_max_discharge": "Solax max discharge power (W)",
+          "solax_cmd_deadband": "Solax command deadband (W)"
         },
         "data_description": {
           "test_mode": "When enabled, simulated entities are created for all signals. Disabling removes them on next reload.",
@@ -135,7 +136,8 @@
           "monitored_load_1_headroom": "Import headroom (W) kept available when load is active.",
           "monitored_load_1_holdoff_minutes": "Minutes load must be off before headroom is released.",
           "solax_max_charge": "Physical charge power limit of the Solax inverter. Default 2400 W for X1 AC G3.",
-          "solax_max_discharge": "Physical discharge power limit of the Solax inverter. Default 2400 W for X1 AC G3."
+          "solax_max_discharge": "Physical discharge power limit of the Solax inverter. Default 2400 W for X1 AC G3.",
+          "solax_cmd_deadband": "Only update the Solax power setpoint when the new command differs from the last written value by at least this amount. The autorepeat trigger is always pressed. Default 50 W."
         }
       },
       "entities": {

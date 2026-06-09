@@ -43,6 +43,7 @@ from .const import (
     CONF_RAMP_STEP,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
+    CONF_SOLAX_CMD_DEADBAND,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TRACKING_DEADBAND,
@@ -60,6 +61,7 @@ from .const import (
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOLAX_AUTOREPEAT_DURATION,
+    DEFAULT_SOLAX_CMD_DEADBAND,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TRACKING_DEADBAND,
@@ -141,6 +143,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._mon_load_1_below_since: datetime | None = None
         # Solax priority-2 state
         self._solax_active: bool = False  # True when coordinator is commanding Solax
+        self._solax_last_written_cmd: float = 0.0  # last power setpoint written to inverter
         super().__init__(
             hass=hass,
             logger=LOGGER,
@@ -572,36 +575,48 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         command > 0 = discharge, < 0 = charge, 0 = return to self-consumption.
         Solax convention for remotecontrol_active_power is inverted: negative = discharge.
+
+        Command deadband: only update the power setpoint when the new command differs
+        from the last written value by more than CONF_SOLAX_CMD_DEADBAND watts. The
+        autorepeat trigger is always pressed to keep the inverter in remote-control mode.
         """
         want_active = command != 0.0
+        deadband = float(self._opt(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND))
         try:
             if want_active:
-                # Ensure power control mode is "Enabled Power Control"
-                entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
-                if _str(self.hass, entity_rc) != SOLAX_RC_MODE_ENABLED:
+                setpoint_changed = (
+                    not self._solax_active
+                    or abs(command - self._solax_last_written_cmd) >= deadband
+                )
+                if setpoint_changed:
+                    # Ensure power control mode is "Enabled Power Control"
+                    entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
+                    if _str(self.hass, entity_rc) != SOLAX_RC_MODE_ENABLED:
+                        async with asyncio.timeout(5):
+                            await self.hass.services.async_call(
+                                "select", "select_option",
+                                {"entity_id": entity_rc, "option": SOLAX_RC_MODE_ENABLED},
+                                blocking=True,
+                            )
+                    # Set active power (negate: Solax negative = discharge)
                     async with asyncio.timeout(5):
                         await self.hass.services.async_call(
-                            "select", "select_option",
-                            {"entity_id": entity_rc, "option": SOLAX_RC_MODE_ENABLED},
+                            "number", "set_value",
+                            {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER),
+                             "value": str(int(-command))},
                             blocking=True,
                         )
-                # Set active power (negate: Solax negative = discharge)
-                async with asyncio.timeout(5):
-                    await self.hass.services.async_call(
-                        "number", "set_value",
-                        {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER),
-                         "value": str(int(-command))},
-                        blocking=True,
-                    )
-                # Set autorepeat duration so command survives between coordinator ticks
-                async with asyncio.timeout(5):
-                    await self.hass.services.async_call(
-                        "number", "set_value",
-                        {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION),
-                         "value": str(DEFAULT_SOLAX_AUTOREPEAT_DURATION)},
-                        blocking=True,
-                    )
-                # Press trigger to activate / refresh the autorepeat
+                    # Set autorepeat duration so command survives between coordinator ticks
+                    async with asyncio.timeout(5):
+                        await self.hass.services.async_call(
+                            "number", "set_value",
+                            {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION),
+                             "value": str(DEFAULT_SOLAX_AUTOREPEAT_DURATION)},
+                            blocking=True,
+                        )
+                    self._solax_last_written_cmd = command
+                    LOGGER.debug("solax: command=%.0fW (rc_active_power=%.0f)", command, -command)
+                # Always press trigger to keep the autorepeat alive, even within deadband
                 async with asyncio.timeout(5):
                     await self.hass.services.async_call(
                         "button", "press",
@@ -609,7 +624,6 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                         blocking=True,
                     )
                 self._solax_active = True
-                LOGGER.debug("solax: command=%.0fW (rc_active_power=%.0f)", command, -command)
             elif self._solax_active:
                 await self._async_enter_solax_self_consumption()
         except Exception as err:  # noqa: BLE001
@@ -643,6 +657,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             LOGGER.warning("Solax release failed: %s", err)
         finally:
             self._solax_active = False
+            self._solax_last_written_cmd = 0.0
 
     # ── inverter write ────────────────────────────────────────────────────────
 

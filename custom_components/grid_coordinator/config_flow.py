@@ -40,6 +40,7 @@ from .const import (
     CONF_RAMP_STEP,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
+    CONF_SOLAX_CMD_DEADBAND,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TEST_MODE,
@@ -56,6 +57,7 @@ from .const import (
     DEFAULT_RAMP_STEP,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
+    DEFAULT_SOLAX_CMD_DEADBAND,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TRACKING_DEADBAND,
@@ -129,6 +131,10 @@ def _params_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_SOLAX_MAX_DISCHARGE, default=defaults.get(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=500, max=6000, step=100, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_SOLAX_CMD_DEADBAND, default=defaults.get(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=500, step=10, unit_of_measurement="W", mode=_NUM,
                 )),
         }
     )
@@ -281,6 +287,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_MON_LOAD_1_HOLDOFF_MINUTES: self._current(CONF_MON_LOAD_1_HOLDOFF_MINUTES, DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES),
             CONF_SOLAX_MAX_CHARGE: self._current(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE),
             CONF_SOLAX_MAX_DISCHARGE: self._current(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE),
+            CONF_SOLAX_CMD_DEADBAND: self._current(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND),
         }
         return self.async_show_form(
             step_id="init",
