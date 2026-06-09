@@ -567,9 +567,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     # ── Solax helpers ─────────────────────────────────────────────────────────
 
-def _solax_enabled(self) -> bool:
-    """Return True when a Solax SOC entity is explicitly configured."""
-    return bool(str(self._opt(CONF_ENTITY_SOLAX_SOC, "")).strip())
+    def _solax_enabled(self) -> bool:
+        """Return True when a Solax SOC entity is explicitly configured."""
+        return bool(str(self._opt(CONF_ENTITY_SOLAX_SOC, "")).strip())
 
     async def _async_write_solax(self, command: float) -> None:
         """Command Solax at the given power or release it to self-consumption.
