@@ -4,15 +4,17 @@ import pytest
 
 from custom_components.grid_coordinator.budget import (
     build_coordinator_data,
+    compute_solax_command,
     compute_voltx_command,
 )
-from custom_components.grid_coordinator.models import CoordinatorData, CoordinatorMode
+from custom_components.grid_coordinator.models import CoordinatorData, CoordinatorMode, SolaxMode
 
 # ── helpers ────────────────────────────────────────────────────────────────────
 
 _DEFAULTS = dict(
     grid_actual=0.0,
     grid_target=0.0,
+    mpc_batt_cmd=0.0,
     prev_cmd=0.0,
     soc=50.0,
     soc_min=20.0,
@@ -35,9 +37,9 @@ def cmd(**overrides) -> tuple[float, CoordinatorMode]:
 
 
 def test_closes_error_in_one_step():
-    """PI controller closes a grid error in one step when unconstrained."""
+    """2-tier controller closes grid error when mpc_batt_cmd is zero."""
     command, mode = cmd(grid_actual=2000.0, grid_target=500.0)
-    # error = 2000 - 500 = 1500 → prev_cmd=0 + 1500 = 1500 W discharge
+    # mpc_batt_cmd=0 + correction=(2000-500)=1500 → 1500 W discharge
     assert command == 1500
     assert mode == CoordinatorMode.EMHASS_TRACKING
 
@@ -45,8 +47,54 @@ def test_closes_error_in_one_step():
 def test_negative_error_charges():
     """When grid is below target (e.g. exporting too much), command goes negative."""
     command, mode = cmd(grid_actual=-500.0, grid_target=0.0, prev_cmd=0.0)
-    # error = -500 → cmd = 0 + (-500) = -500 W (charge)
+    # mpc_batt_cmd=0 + correction=(-500-0)=-500 → -500 W (charge)
     assert command == -500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+# ── 2-tier: mpc_batt_cmd as primary signal ────────────────────────────────────
+
+
+def test_executes_mpc_batt_cmd_directly():
+    """When forecast is accurate (grid_actual == grid_target), correction is zero."""
+    command, mode = cmd(
+        mpc_batt_cmd=2000.0, grid_actual=1000.0, grid_target=1000.0
+    )
+    # correction = 1000 - 1000 = 0 → raw_cmd = 2000 + 0 = 2000
+    assert command == 2000
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_correction_added_to_mpc_batt_cmd():
+    """When actual grid deviates from forecast, correction is added to mpc_batt_cmd."""
+    command, mode = cmd(
+        mpc_batt_cmd=1000.0, grid_actual=1500.0, grid_target=1000.0,
+        ramp_step=5000.0,
+    )
+    # raw_cmd = 1000 + (1500 - 1000) = 1500
+    assert command == 1500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_mpc_batt_cmd_negative_charges():
+    """Negative mpc_batt_cmd (EMHASS wants to charge) with no grid error."""
+    command, mode = cmd(
+        mpc_batt_cmd=-2000.0, grid_actual=500.0, grid_target=500.0,
+        ramp_step=5000.0,
+    )
+    # raw_cmd = -2000 + 0 = -2000 (charge)
+    assert command == -2000
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_correction_opposes_mpc_batt_cmd():
+    """Correction term can partially cancel mpc_batt_cmd when actual < target."""
+    command, mode = cmd(
+        mpc_batt_cmd=2000.0, grid_actual=500.0, grid_target=1000.0,
+        ramp_step=5000.0,
+    )
+    # raw_cmd = 2000 + (500 - 1000) = 2000 - 500 = 1500
+    assert command == 1500
     assert mode == CoordinatorMode.EMHASS_TRACKING
 
 
@@ -223,6 +271,128 @@ def test_stale_plan_in_deadband_still_stale():
 # ── build_coordinator_data ────────────────────────────────────────────────────
 
 
+# ── compute_solax_command ─────────────────────────────────────────────────────
+
+_SOLAX = dict(
+    grid_after_voltx=0.0,
+    grid_target=0.0,
+    solax_soc=50.0,
+    solax_soc_min=20.0,
+    solax_soc_max=95.0,
+    solax_max_charge=2400.0,
+    solax_max_discharge=2400.0,
+    import_limit=12000.0,
+    export_limit=10000.0,
+)
+
+
+def solax(**overrides) -> tuple[float, SolaxMode]:
+    return compute_solax_command(**{**_SOLAX, **overrides})
+
+
+def test_solax_inactive_for_normal_tracking():
+    cmd, mode = solax(voltx_mode=CoordinatorMode.EMHASS_TRACKING)
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
+def test_solax_inactive_for_self_consumption():
+    cmd, mode = solax(voltx_mode=CoordinatorMode.SELF_CONSUMPTION)
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
+def test_solax_discharges_on_soc_floor_with_residual():
+    """Voltx at SOC floor + grid above target → Solax discharges the delta."""
+    # Voltx can't discharge (SOC floor); grid_after_voltx = 5000, target = 2000
+    # residual = 5000 - 2000 = 3000 → capped at max_discharge=2400
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=5000.0,
+        grid_target=2000.0,
+    )
+    assert cmd == 2400.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+def test_solax_discharges_exact_residual_within_limit():
+    """Residual below max_discharge → exact residual is commanded."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=3000.0,
+        grid_target=2000.0,
+    )
+    assert cmd == 1000.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+def test_solax_charges_on_soc_ceiling_with_residual():
+    """Voltx at SOC ceiling + grid below target → Solax charges the delta."""
+    # grid_after_voltx = -2000 (exporting), target = 0 → residual = -2000 - 0 = -2000 (charge)
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_CEILING,
+        grid_after_voltx=-2000.0,
+        grid_target=0.0,
+    )
+    assert cmd == -2000.0
+    assert mode == SolaxMode.FORCE_CHARGE
+
+
+def test_solax_inactive_when_no_residual():
+    """Voltx at SOC floor but grid already at target → Solax stays idle."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=2000.0,
+        grid_target=2000.0,
+    )
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
+def test_solax_soc_floor_blocks_discharge():
+    """Solax SOC at floor → discharge suppressed even though residual exists."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=5000.0,
+        grid_target=2000.0,
+        solax_soc=20.0,
+        solax_soc_min=20.0,
+    )
+    assert cmd == 0.0
+    assert mode == SolaxMode.SOC_FLOOR
+
+
+def test_solax_soc_ceiling_blocks_charge():
+    """Solax SOC at ceiling → charge suppressed even though residual exists."""
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_CEILING,
+        grid_after_voltx=-2000.0,
+        grid_target=0.0,
+        solax_soc=95.0,
+        solax_soc_max=95.0,
+    )
+    assert cmd == 0.0
+    assert mode == SolaxMode.SOC_CEILING
+
+
+def test_solax_discharge_clamped_by_export_limit():
+    """Discharging Solax must not push grid past the export limit."""
+    # grid_after_voltx = -9500 (exporting), target = -11000 (wants more export)
+    # residual = -9500 - (-11000) = 1500 (discharge) but grid_limit_ceil = -9500 + 10000 = 500
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.SOC_FLOOR,
+        grid_after_voltx=-9500.0,
+        grid_target=-11000.0,
+        export_limit=10000.0,
+    )
+    projected = -9500.0 - cmd
+    assert projected >= -10000.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+# ── build_coordinator_data ────────────────────────────────────────────────────
+
+
 def test_build_coordinator_data_headroom():
     data = build_coordinator_data(
         mode=CoordinatorMode.EMHASS_TRACKING,
@@ -235,6 +405,6 @@ def test_build_coordinator_data_headroom():
     )
     assert isinstance(data, CoordinatorData)
     assert data.import_headroom == pytest.approx(10000.0)  # 12000 - 2000
-    assert data.export_headroom == pytest.approx(12000.0)  # 10000 + 2000
+    assert data.export_headroom == pytest.approx(10000.0)  # 10000 - 0
     assert data.plan_age_minutes == 1.0
     assert data.override_mode is None

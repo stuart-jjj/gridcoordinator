@@ -11,10 +11,18 @@ from .const import (
     CONF_ENTITY_ENABLED,
     CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
+    CONF_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_MON_LOAD_1,
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
+    CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
+    CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
+    CONF_ENTITY_SOLAX_RC_POWER_CONTROL,
+    CONF_ENTITY_SOLAX_RC_TRIGGER,
+    CONF_ENTITY_SOLAX_SOC,
+    CONF_ENTITY_SOLAX_SOC_MAX,
+    CONF_ENTITY_SOLAX_SOC_MIN,
     CONF_ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
@@ -26,11 +34,15 @@ from .const import (
     CONF_MON_LOAD_1_HEADROOM,
     CONF_MON_LOAD_1_HOLDOFF_MINUTES,
     CONF_MON_LOAD_1_THRESHOLD,
+    CONF_MPC_BATT_SIGN_INVERTED,
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
+    CONF_SOLAX_CMD_DEADBAND,
+    CONF_SOLAX_MAX_CHARGE,
+    CONF_SOLAX_MAX_DISCHARGE,
     CONF_TEST_MODE,
     CONF_TRACKING_DEADBAND,
     DEFAULT_EV_CHARGER_THRESHOLD,
@@ -39,11 +51,15 @@ from .const import (
     DEFAULT_MON_LOAD_1_HEADROOM,
     DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES,
     DEFAULT_MON_LOAD_1_THRESHOLD,
+    DEFAULT_MPC_BATT_SIGN_INVERTED,
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
+    DEFAULT_SOLAX_CMD_DEADBAND,
+    DEFAULT_SOLAX_MAX_CHARGE,
+    DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TRACKING_DEADBAND,
     DOMAIN,
     ENTITY_EV_CHARGER,
@@ -80,6 +96,8 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 )),
             vol.Required(CONF_MPC_SIGN_INVERTED, default=defaults.get(CONF_MPC_SIGN_INVERTED, DEFAULT_MPC_SIGN_INVERTED)):
                 selector.BooleanSelector(),
+            vol.Required(CONF_MPC_BATT_SIGN_INVERTED, default=defaults.get(CONF_MPC_BATT_SIGN_INVERTED, DEFAULT_MPC_BATT_SIGN_INVERTED)):
+                selector.BooleanSelector(),
             vol.Required(CONF_SELF_CONSUMPTION_MODE, default=defaults.get(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE)):
                 _TEXT,
             vol.Required(CONF_SELF_CONSUMPTION_DEADBAND, default=defaults.get(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND)):
@@ -106,6 +124,33 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=1, max=30, step=1, unit_of_measurement="min", mode=_NUM,
                 )),
+            vol.Required(CONF_SOLAX_MAX_CHARGE, default=defaults.get(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=500, max=6000, step=100, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_SOLAX_MAX_DISCHARGE, default=defaults.get(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=500, max=6000, step=100, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_SOLAX_CMD_DEADBAND, default=defaults.get(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=500, step=10, unit_of_measurement="W", mode=_NUM,
+                )),
+        }
+    )
+
+
+def _solax_schema(defaults: dict) -> vol.Schema:
+    """Schema for Solax entity ID configuration (step 3)."""
+    return vol.Schema(
+        {
+            vol.Optional(CONF_ENTITY_SOLAX_SOC, default=defaults.get(CONF_ENTITY_SOLAX_SOC, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_SOC_MIN, default=defaults.get(CONF_ENTITY_SOLAX_SOC_MIN, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC_MIN])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_SOC_MAX, default=defaults.get(CONF_ENTITY_SOLAX_SOC_MAX, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC_MAX])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_RC_POWER_CONTROL, default=defaults.get(CONF_ENTITY_SOLAX_RC_POWER_CONTROL, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_RC_POWER_CONTROL])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER, default=defaults.get(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_RC_ACTIVE_POWER])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION, default=defaults.get(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_RC_TRIGGER, default=defaults.get(CONF_ENTITY_SOLAX_RC_TRIGGER, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_RC_TRIGGER])): _TEXT,
         }
     )
 
@@ -116,6 +161,7 @@ def _entities_schema(defaults: dict) -> vol.Schema:
         {
             vol.Required(CONF_ENTITY_GRID_POWER, default=defaults.get(CONF_ENTITY_GRID_POWER, ENTITY_ID_DEFAULTS[CONF_ENTITY_GRID_POWER])): _TEXT,
             vol.Required(CONF_ENTITY_MPC_GRID_POWER, default=defaults.get(CONF_ENTITY_MPC_GRID_POWER, ENTITY_ID_DEFAULTS[CONF_ENTITY_MPC_GRID_POWER])): _TEXT,
+            vol.Required(CONF_ENTITY_MPC_BATT_POWER, default=defaults.get(CONF_ENTITY_MPC_BATT_POWER, ENTITY_ID_DEFAULTS[CONF_ENTITY_MPC_BATT_POWER])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_SOC, default=defaults.get(CONF_ENTITY_VOLTX_SOC, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_SOC])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_MAX_CHARGE, default=defaults.get(CONF_ENTITY_VOLTX_MAX_CHARGE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_MAX_CHARGE])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_MAX_DISCHARGE, default=defaults.get(CONF_ENTITY_VOLTX_MAX_DISCHARGE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_MAX_DISCHARGE])): _TEXT,
@@ -168,11 +214,25 @@ class GridCoordinatorFlowHandler(ConfigFlow, domain=DOMAIN):
         """Step 2 — entity ID mapping (non-testing mode only)."""
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="Grid Coordinator", data=self._data)
+            return await self.async_step_solax()
 
         return self.async_show_form(
             step_id="entities",
             data_schema=_entities_schema(ENTITY_ID_DEFAULTS),
+        )
+
+    async def async_step_solax(
+        self,
+        user_input: dict | None = None,
+    ) -> ConfigFlowResult:
+        """Step 3 — Solax entity IDs."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return self.async_create_entry(title="Grid Coordinator", data=self._data)
+
+        return self.async_show_form(
+            step_id="solax",
+            data_schema=_solax_schema(ENTITY_ID_DEFAULTS),
         )
 
     @staticmethod
@@ -217,6 +277,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_RAMP_STEP: self._current(CONF_RAMP_STEP, DEFAULT_RAMP_STEP),
             CONF_PLAN_STALE_MINUTES: self._current(CONF_PLAN_STALE_MINUTES, DEFAULT_PLAN_STALE_MINUTES),
             CONF_MPC_SIGN_INVERTED: self._current(CONF_MPC_SIGN_INVERTED, DEFAULT_MPC_SIGN_INVERTED),
+            CONF_MPC_BATT_SIGN_INVERTED: self._current(CONF_MPC_BATT_SIGN_INVERTED, DEFAULT_MPC_BATT_SIGN_INVERTED),
             CONF_SELF_CONSUMPTION_MODE: self._current(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE),
             CONF_SELF_CONSUMPTION_DEADBAND: self._current(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND),
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
@@ -224,6 +285,9 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_MON_LOAD_1_THRESHOLD: self._current(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD),
             CONF_MON_LOAD_1_HEADROOM: self._current(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM),
             CONF_MON_LOAD_1_HOLDOFF_MINUTES: self._current(CONF_MON_LOAD_1_HOLDOFF_MINUTES, DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES),
+            CONF_SOLAX_MAX_CHARGE: self._current(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE),
+            CONF_SOLAX_MAX_DISCHARGE: self._current(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE),
+            CONF_SOLAX_CMD_DEADBAND: self._current(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND),
         }
         return self.async_show_form(
             step_id="init",
@@ -237,7 +301,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         """Step 2 — entity ID mapping."""
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="", data=self._data)
+            return await self.async_step_solax()
 
         # If testing mode was just enabled, default to simulated entity IDs.
         # Otherwise keep the current entity IDs (which may already be overrides).
@@ -253,4 +317,33 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         return self.async_show_form(
             step_id="entities",
             data_schema=_entities_schema(entity_defaults),
+        )
+
+    async def async_step_solax(
+        self,
+        user_input: dict | None = None,
+    ) -> ConfigFlowResult:
+        """Step 3 — Solax entity IDs."""
+        if user_input is not None:
+            self._data.update(user_input)
+            return self.async_create_entry(title="", data=self._data)
+
+        solax_keys = (
+            CONF_ENTITY_SOLAX_SOC,
+            CONF_ENTITY_SOLAX_SOC_MIN,
+            CONF_ENTITY_SOLAX_SOC_MAX,
+            CONF_ENTITY_SOLAX_RC_POWER_CONTROL,
+            CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
+            CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
+            CONF_ENTITY_SOLAX_RC_TRIGGER,
+        )
+        test_mode = self._data.get(CONF_TEST_MODE, False)
+        solax_defaults = {
+            k: self._current(k, SIM_ENTITY_IDS[k] if test_mode else ENTITY_ID_DEFAULTS[k])
+            for k in solax_keys
+        }
+
+        return self.async_show_form(
+            step_id="solax",
+            data_schema=_solax_schema(solax_defaults),
         )

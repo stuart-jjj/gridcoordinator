@@ -6,6 +6,16 @@ from dataclasses import dataclass
 from enum import StrEnum
 
 
+class SolaxMode(StrEnum):
+    """Operating mode of the Solax priority-2 battery."""
+
+    SELF_CONSUMPTION = "self_consumption"  # not commanded; inverter manages itself
+    FORCE_CHARGE = "force_charge"          # coordinator charging to absorb excess export
+    FORCE_DISCHARGE = "force_discharge"    # coordinator discharging to reduce import
+    SOC_FLOOR = "soc_floor"               # discharge needed but Solax also at SOC floor
+    SOC_CEILING = "soc_ceiling"           # charge needed but Solax also at SOC ceiling
+
+
 class CoordinatorMode(StrEnum):
     """Operating mode / active constraint reported by the coordinator."""
 
@@ -40,3 +50,6 @@ class CoordinatorData:
     export_headroom: float   # W remaining before export limit is reached
     plan_age_minutes: float  # minutes since mpc_grid_power was last updated
     override_mode: str | None = None  # active override key; None when following EMHASS normally
+    mpc_batt_power: float = 0.0        # W — EMHASS battery setpoint used this tick (positive = discharge)
+    solax_command: float = 0.0          # W sent to Solax; positive = discharge, negative = charge
+    solax_mode: SolaxMode = SolaxMode.SELF_CONSUMPTION  # Solax operating mode this tick
