@@ -5,8 +5,7 @@
 
   Testing workflow:
   - Slide Stub Grid Power to simulate grid import/export (e.g. +2000 W = importing 2 kW)
-  - Slide Stub MPC Grid Power to simulate EMHASS setpoints (note: sign-inverted by default, so -500 = target 500 W
-  import)
+  - Slide Stub MPC Grid Power to simulate EMHASS setpoints (default: +500 = target 500 W import; enable “Invert mpc_grid_power sign” if positive = export in your EMHASS)
   - Watch Voltx Command and Mode sensors update every 10 seconds
   - Stub Voltx CMD Mirror shows what the coordinator is writing to the inverter
 
