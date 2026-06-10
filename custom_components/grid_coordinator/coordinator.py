@@ -349,7 +349,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # so neither leaks into the controller if the deadband is ever set to 0.
         effective_target = grid_target if not plan_is_stale else 0.0
         effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
-        if abs(effective_target) <= self._self_consumption_deadband:
+        if abs(effective_target) <= self._self_consumption_deadband and abs(effective_mpc_batt) <= self._self_consumption_deadband:
             await self._async_enter_self_consumption()
             if self._solax_enabled() and self._solax_active:
                 await self._async_enter_solax_self_consumption()
