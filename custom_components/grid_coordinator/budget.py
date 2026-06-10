@@ -61,9 +61,12 @@ def compute_voltx_command(
     # Tracking deadband — hold the current command when the grid error is small.
     # Prevents command chatter from measurement noise and small load fluctuations.
     # Grid safety limits are not re-evaluated here; prev_cmd was already safe.
-    # Skip the early return when headroom is active: the oven may have just turned on
-    # and the charging floor must be enforced even if the grid error is within the band.
-    if abs(grid_actual - grid_target) <= tracking_deadband and headroom_reserve == 0:
+    # Skip when headroom is active (oven may have just fired) or when mpc_batt_cmd
+    # has moved significantly from prev_cmd — a new EMHASS plan must be acted on
+    # even when the grid happens to be near target (e.g. solar-powered charging).
+    if (abs(grid_actual - grid_target) <= tracking_deadband
+            and abs(mpc_batt_cmd - prev_cmd) <= tracking_deadband
+            and headroom_reserve == 0):
         # Report the binding SOC constraint even in deadband so Solax knows Voltx is bounded.
         # Without this, Solax successfully brings grid near target → deadband fires →
         # mode=emhass_tracking → Solax released → grid shoots up again (2-tick oscillation).
