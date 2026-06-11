@@ -70,7 +70,7 @@ ENTITY_MPC_GRID_POWER = "sensor.mpc_grid_power"
 # EMHASS output — positive = import from grid (same as grid sensor).
 # Set CONF_MPC_SIGN_INVERTED=True if your EMHASS uses injection convention (positive = export).
 
-ENTITY_MPC_BATT_POWER = "sensor.mpc_battery_power"
+ENTITY_MPC_BATT_POWER = "sensor.mpc_batt_power"
 # EMHASS output — positive = discharging (same as voltx_command convention).
 
 ENTITY_VOLTX_SOC = "sensor.battery_state_of_charge"                            # %

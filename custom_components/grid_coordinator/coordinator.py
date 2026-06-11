@@ -144,6 +144,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Solax priority-2 state
         self._solax_active: bool = False  # True when coordinator is commanding Solax
         self._solax_last_written_cmd: float = 0.0  # last power setpoint written to inverter
+        # Entities already warned about, so a missing control input logs once not 6×/min
+        self._warned_missing: set[str] = set()
         super().__init__(
             hass=hass,
             logger=LOGGER,
@@ -152,6 +154,38 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
 
     # ── config helpers ────────────────────────────────────────────────────────
+
+    def _float_control(self, entity_id: str, default: float) -> float:
+        """Read a control input as float, warning once if it cannot be read.
+
+        Unlike the silent _float fallback, control inputs (the EMHASS setpoints)
+        make the controller meaningfully wrong when absent — e.g. a missing
+        battery setpoint entity silently degrades tier 1 to zero. Warn on the
+        first failed read per entity; reset when the entity recovers.
+        """
+        state = self.hass.states.get(entity_id)
+        bad = state is None or state.state in ("unavailable", "unknown", "")
+        value: float | None = None
+        if not bad:
+            try:
+                value = float(state.state)
+            except (ValueError, TypeError):
+                bad = True
+        if bad:
+            if entity_id not in self._warned_missing:
+                self._warned_missing.add(entity_id)
+                LOGGER.warning(
+                    "control input %s is missing/unreadable (state=%s); "
+                    "falling back to %.0f — check the configured entity id",
+                    entity_id,
+                    state.state if state else None,
+                    default,
+                )
+            return default
+        if entity_id in self._warned_missing:
+            self._warned_missing.discard(entity_id)
+            LOGGER.warning("control input %s is readable again", entity_id)
+        return value
 
     def _opt(self, key: str, default):
         """Read from entry options first, then entry data, then supplied default."""
@@ -335,10 +369,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # ── read EMHASS setpoints ──────────────────────────────────────────
         plan_age = _plan_age_minutes(hass, entity_mpc)
-        mpc_raw = _float(hass, entity_mpc, 0.0)
+        mpc_raw = self._float_control(entity_mpc, 0.0)
         grid_target = -mpc_raw if self._mpc_sign_inverted else mpc_raw
 
-        mpc_batt_raw = _float(hass, self._eid(CONF_ENTITY_MPC_BATT_POWER), 0.0)
+        mpc_batt_raw = self._float_control(self._eid(CONF_ENTITY_MPC_BATT_POWER), 0.0)
         mpc_batt_sign_inv = bool(self._opt(CONF_MPC_BATT_SIGN_INVERTED, DEFAULT_MPC_BATT_SIGN_INVERTED))
         mpc_batt_cmd = -mpc_batt_raw if mpc_batt_sign_inv else mpc_batt_raw
 
