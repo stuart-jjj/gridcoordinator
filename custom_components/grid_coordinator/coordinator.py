@@ -316,20 +316,6 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         entity_soc_min = self._eid(CONF_ENTITY_SOC_MIN)
         entity_soc_max = self._eid(CONF_ENTITY_SOC_MAX)
 
-        # ── cold-start: seed prev_cmd from hardware ─────────────────────────
-        # On the first tick after HA starts or the integration is reloaded the
-        # inverter may already be running at a non-zero command.  Reading the
-        # current entity state avoids an unwanted step-change on the first write.
-        if self._cold_start:
-            self._cold_start = False
-            entity_cmd = self._eid(CONF_ENTITY_VOLTX_CMD)
-            self._prev_cmd = _float(hass, entity_cmd, 0.0)
-            LOGGER.debug(
-                "cold start: seeding prev_cmd=%.0fW from %s",
-                self._prev_cmd,
-                entity_cmd,
-            )
-
         # ── disabled gate ──────────────────────────────────────────────────
         if _str(hass, entity_enabled, "off") != "on":
             await self._async_enter_self_consumption()
@@ -357,6 +343,22 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Sensor staleness matters for diagnosis: a laggy grid sensor makes the
         # tier-2 correction act on old data.
         grid_age_s = (datetime.now(UTC) - grid_state.last_updated).total_seconds()
+
+        # On the first successful tick after HA starts or the integration is
+        # reloaded the inverter may already be running at a non-zero command.
+        # Reading the current entity state avoids an unwanted step-change on the
+        # first write.  Runs after the grid-sensor gate so failed startup ticks
+        # (grid sensor not loaded yet) don't consume the cold start while the
+        # inverter entities are likely also still unavailable.
+        if self._cold_start:
+            self._cold_start = False
+            entity_cmd = self._eid(CONF_ENTITY_VOLTX_CMD)
+            self._prev_cmd = _float(hass, entity_cmd, 0.0)
+            LOGGER.debug(
+                "cold start: seeding prev_cmd=%.0fW from %s",
+                self._prev_cmd,
+                entity_cmd,
+            )
 
         # ── manual override ────────────────────────────────────────────────
         # Expire and clear the override if its duration has elapsed.

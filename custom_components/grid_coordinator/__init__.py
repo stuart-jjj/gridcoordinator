@@ -7,7 +7,7 @@ from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, ServiceCall
 from homeassistant.helpers import config_validation as cv
 
-from .const import CONF_TEST_MODE, DEFAULT_OVERRIDE_DURATION_MINUTES, DOMAIN
+from .const import CONF_TEST_MODE, DEFAULT_OVERRIDE_DURATION_MINUTES, DOMAIN, LOGGER
 from .coordinator import GridCoordinator
 from .data import GridCoordinatorConfigEntry
 
@@ -36,7 +36,16 @@ async def async_setup_entry(
     coordinator = GridCoordinator(hass, entry)
     entry.runtime_data = coordinator
 
-    await coordinator.async_config_entry_first_refresh()
+    # Tolerate a failed first refresh instead of raising ConfigEntryNotReady:
+    # at HA startup the grid power sensor (iammeter modbus) often isn't loaded
+    # yet. async_refresh() records the failure (entities show unavailable) and
+    # the 10 s update cycle recovers on its own once the sensor appears.
+    await coordinator.async_refresh()
+    if not coordinator.last_update_success:
+        LOGGER.warning(
+            "initial refresh failed (grid sensor not ready?); "
+            "entities will be unavailable until the next successful update"
+        )
 
     test_mode = entry.options.get(CONF_TEST_MODE, entry.data.get(CONF_TEST_MODE, False))
     platforms = list(_BASE_PLATFORMS) + (list(_SIM_PLATFORMS) if test_mode else [])
