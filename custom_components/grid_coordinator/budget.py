@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .models import CoordinatorData, CoordinatorMode, SolaxMode
+from .models import CoordinatorData, CoordinatorMode, SolaxMode, VoltxDiag
 
 
 def compute_voltx_command(
@@ -22,7 +22,7 @@ def compute_voltx_command(
     plan_is_stale: bool,
     tracking_deadband: float = 0.0,
     headroom_reserve: float = 0.0,
-) -> tuple[float, CoordinatorMode]:
+) -> tuple[float, CoordinatorMode, VoltxDiag]:
     """Compute the Voltx battery command for one 10 s tick.
 
     Sign conventions (all Watts):
@@ -56,8 +56,18 @@ def compute_voltx_command(
     headroom_reserve tightens the effective import limit so that the specified
     number of watts remains available for transient loads (e.g. oven spike).
 
-    Returns (command_W rounded to int, active_mode).
+    Returns (command_W rounded to int, active_mode, diagnostics).
     """
+    uncontrolled = grid_actual + prev_cmd
+    # Tighten the import floor by headroom_reserve so charging is reduced to keep
+    # import capacity available for transient loads (e.g. oven spike).
+    cmd_floor = uncontrolled - (import_limit - headroom_reserve)
+    cmd_ceil = uncontrolled + export_limit
+
+    # Two-tier: EMHASS battery setpoint + proportional grid correction.
+    raw_cmd = mpc_batt_cmd + (grid_actual - grid_target)
+    unclamped_cmd = raw_cmd  # preserved for diagnostics before constraints rewrite it
+
     # Tracking deadband — hold the current command when the grid error is small.
     # Prevents command chatter from measurement noise and small load fluctuations.
     # Grid safety limits are not re-evaluated here; prev_cmd was already safe.
@@ -79,16 +89,15 @@ def compute_voltx_command(
             mode = CoordinatorMode.SOC_CEILING
         else:
             mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
-        return round(prev_cmd), mode
-
-    uncontrolled = grid_actual + prev_cmd
-    # Tighten the import floor by headroom_reserve so charging is reduced to keep
-    # import capacity available for transient loads (e.g. oven spike).
-    cmd_floor = uncontrolled - (import_limit - headroom_reserve)
-    cmd_ceil = uncontrolled + export_limit
-
-    # Two-tier: EMHASS battery setpoint + proportional grid correction.
-    raw_cmd = mpc_batt_cmd + (grid_actual - grid_target)
+        diag = VoltxDiag(
+            deadband_hold=True,
+            uncontrolled=uncontrolled,
+            raw_cmd=unclamped_cmd,
+            cmd_floor=cmd_floor,
+            cmd_ceil=cmd_ceil,
+            ramped_cmd=prev_cmd,
+        )
+        return round(prev_cmd), mode, diag
 
     mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
 
@@ -102,7 +111,12 @@ def compute_voltx_command(
         mode = CoordinatorMode.SOC_CEILING
 
     # Inverter physical limits
-    raw_cmd = max(-max_charge, min(max_discharge, raw_cmd))
+    if raw_cmd < -max_charge:
+        raw_cmd = -max_charge
+        mode = CoordinatorMode.CHARGE_LIMIT
+    elif raw_cmd > max_discharge:
+        raw_cmd = max_discharge
+        mode = CoordinatorMode.DISCHARGE_LIMIT
 
     # Ramp — smooth transitions; grid safety clamp below can override it
     delta = raw_cmd - prev_cmd
@@ -119,9 +133,22 @@ def compute_voltx_command(
     # Re-apply inverter physical limits last so the written command is always
     # deliverable even when the grid-safety clamp demands more than the inverter
     # can provide (overloaded scenario: grid_power > import_limit + max_discharge).
-    final_cmd = max(-max_charge, min(max_discharge, final_cmd))
+    if final_cmd < -max_charge:
+        final_cmd = -max_charge
+        mode = CoordinatorMode.CHARGE_LIMIT
+    elif final_cmd > max_discharge:
+        final_cmd = max_discharge
+        mode = CoordinatorMode.DISCHARGE_LIMIT
 
-    return round(final_cmd), mode
+    diag = VoltxDiag(
+        deadband_hold=False,
+        uncontrolled=uncontrolled,
+        raw_cmd=unclamped_cmd,
+        cmd_floor=cmd_floor,
+        cmd_ceil=cmd_ceil,
+        ramped_cmd=ramped_cmd,
+    )
+    return round(final_cmd), mode, diag
 
 
 def compute_solax_command(

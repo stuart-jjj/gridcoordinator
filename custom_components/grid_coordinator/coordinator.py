@@ -320,6 +320,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             grid_actual = float(grid_state.state)
         except (ValueError, TypeError) as exc:
             raise UpdateFailed(f"{entity_grid} has non-numeric state") from exc
+        # Sensor staleness matters for diagnosis: a laggy grid sensor makes the
+        # tier-2 correction act on old data.
+        grid_age_s = (datetime.now(UTC) - grid_state.last_updated).total_seconds()
 
         # ── manual override ────────────────────────────────────────────────
         # Expire and clear the override if its duration has elapsed.
@@ -356,8 +359,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._prev_cmd = 0.0
             sc_mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
             LOGGER.debug(
-                "tick | grid=%.0fW target=%.0fW mode=%s age=%.1fmin (self-consumption)",
-                grid_actual, grid_target, sc_mode, plan_age,
+                "tick | grid=%.0fW (age=%.0fs) target=%.0fW mpc_batt=%.0fW mode=%s "
+                "plan_age=%.1fmin (self-consumption)",
+                grid_actual, grid_age_s, grid_target, mpc_batt_cmd, sc_mode, plan_age,
             )
             return build_coordinator_data(
                 mode=sc_mode,
@@ -384,7 +388,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         headroom_reserve = self._headroom_reserve(hass)
 
         # ── compute command (pure function, no HA calls) ───────────────────
-        command, mode = compute_voltx_command(
+        prev_cmd = self._prev_cmd  # capture for logging before it is overwritten
+        command, mode, diag = compute_voltx_command(
             grid_actual=grid_actual,
             grid_target=effective_target,
             mpc_batt_cmd=effective_mpc_batt,
@@ -414,6 +419,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._prev_cmd = command
 
         # ── Solax priority-2 command ───────────────────────────────────────
+        prev_solax_cmd = self._solax_last_written_cmd  # capture for logging
+        solax_soc = float("nan")
         if self._solax_enabled():
             solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
             solax_soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
@@ -438,19 +445,38 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
 
         LOGGER.debug(
-            "tick | grid=%.0fW target=%.0fW batt_cmd=%.0fW cmd=%.0fW soc=%.0f%% mode=%s "
-            "age=%.1fmin ev=%s headroom=%.0fW solax_cmd=%.0fW solax_mode=%s",
+            "tick | grid=%.0fW (age=%.0fs) target=%.0fW unctrl=%.0fW mpc_batt=%.0fW "
+            "prev=%.0fW raw=%.0fW ramped=%.0fW cmd=%.0fW hold=%s mode=%s | "
+            "floor=%.0fW ceil=%.0fW maxc=%.0fW maxd=%.0fW soc=%.0f%% [%.0f..%.0f] "
+            "plan_age=%.1fmin stale=%s ev=%s headroom=%.0fW | "
+            "solax cmd=%.0fW mode=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW",
             grid_actual,
+            grid_age_s,
             grid_target,
+            diag.uncontrolled,
             effective_mpc_batt,
+            prev_cmd,
+            diag.raw_cmd,
+            diag.ramped_cmd,
             command,
-            soc,
+            diag.deadband_hold,
             mode,
+            diag.cmd_floor,
+            diag.cmd_ceil,
+            max_charge,
+            max_discharge,
+            soc,
+            effective_soc_min,
+            soc_max,
             plan_age,
+            plan_is_stale,
             ev_active,
             headroom_reserve,
             solax_cmd,
             solax_mode,
+            solax_soc,
+            grid_after_voltx,
+            prev_solax_cmd,
         )
 
         return build_coordinator_data(

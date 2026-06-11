@@ -26,6 +26,8 @@ class CoordinatorMode(StrEnum):
     STALE_PLAN = "stale_plan"           # EMHASS plan too old; holding zero grid target
     IMPORT_CEILING = "import_ceiling"   # import limit is the binding constraint
     EXPORT_CEILING = "export_ceiling"   # export limit is the binding constraint
+    CHARGE_LIMIT = "charge_limit"       # inverter max charge power is the binding constraint
+    DISCHARGE_LIMIT = "discharge_limit"  # inverter max discharge power is the binding constraint
     SOC_FLOOR = "soc_floor"             # battery at min SOC, discharging suppressed
     SOC_CEILING = "soc_ceiling"         # battery at max SOC, charging suppressed
     EV_CHARGING = "ev_charging"              # EV detected; discharge suppressed to let grid absorb load
@@ -36,6 +38,22 @@ class CoordinatorMode(StrEnum):
     OVERRIDE_FORCE_CHARGE = "override_force_charge"
     OVERRIDE_FORCE_EXPORT = "override_force_export"
     OVERRIDE_DISABLED = "override_disabled"
+
+
+@dataclass(frozen=True)
+class VoltxDiag:
+    """Intermediate values from compute_voltx_command, surfaced for debug logging.
+
+    These let a debug-log capture reconstruct exactly which constraint shaped the
+    written command (or whether the tracking deadband held the previous one).
+    """
+
+    deadband_hold: bool   # True = tracking deadband returned prev_cmd unchanged
+    uncontrolled: float   # estimated uncontrolled power: grid_actual + prev_cmd (W)
+    raw_cmd: float        # tier-1 + tier-2 command before any constraint (W)
+    cmd_floor: float      # grid-safety lower bound incl. headroom reserve (W)
+    cmd_ceil: float       # grid-safety upper bound (W)
+    ramped_cmd: float     # after SOC/physical limits and ramp, before grid clamp (W)
 
 
 @dataclass(frozen=True)
