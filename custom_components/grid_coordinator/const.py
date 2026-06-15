@@ -108,6 +108,7 @@ CONF_ENTITY_SOLAX_RC_TRIGGER = "entity_solax_rc_trigger"
 CONF_SOLAX_MAX_CHARGE = "solax_max_charge"
 CONF_SOLAX_MAX_DISCHARGE = "solax_max_discharge"
 CONF_SOLAX_CMD_DEADBAND = "solax_cmd_deadband"
+CONF_SOLAX_ZERO_DEADBAND = "solax_zero_deadband"
 CONF_SOLAX_TIER1_SHARE = "solax_tier1_share"
 
 # ── Solax defaults ─────────────────────────────────────────────────────────────
@@ -115,6 +116,7 @@ DEFAULT_SOLAX_MAX_CHARGE = 2400        # W — X1 AC G3 hardware limit
 DEFAULT_SOLAX_MAX_DISCHARGE = 2400     # W
 DEFAULT_SOLAX_AUTOREPEAT_DURATION = 20 # s — 2× the 10 s tick; hardware expires in 4 s
 DEFAULT_SOLAX_CMD_DEADBAND = 50        # W — suppress command updates smaller than this
+DEFAULT_SOLAX_ZERO_DEADBAND = 0        # W — commands within ±this of zero are suppressed to 0
 DEFAULT_SOLAX_TIER1_SHARE = 0.0        # fraction of mpc_batt_cmd Solax executes in parallel with Voltx
 
 # Remote-control power mode names (as reported by homeassistant-solax-modbus)

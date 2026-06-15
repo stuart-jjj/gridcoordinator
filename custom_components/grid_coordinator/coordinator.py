@@ -44,6 +44,7 @@ from .const import (
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOLAX_CMD_DEADBAND,
+    CONF_SOLAX_ZERO_DEADBAND,
     CONF_SOLAX_TIER1_SHARE,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
@@ -64,6 +65,7 @@ from .const import (
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOLAX_AUTOREPEAT_DURATION,
     DEFAULT_SOLAX_CMD_DEADBAND,
+    DEFAULT_SOLAX_ZERO_DEADBAND,
     DEFAULT_SOLAX_TIER1_SHARE,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
@@ -513,6 +515,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     solax_max_discharge=solax_max_discharge,
                 )
             else:
+                solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
+            # Zero deadband: suppress small commands to avoid unnecessary inverter activity.
+            solax_zero_deadband = float(self._opt(CONF_SOLAX_ZERO_DEADBAND, DEFAULT_SOLAX_ZERO_DEADBAND))
+            if solax_zero_deadband > 0 and abs(solax_cmd) <= solax_zero_deadband:
                 solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
             await self._async_write_solax(solax_cmd)
         else:
