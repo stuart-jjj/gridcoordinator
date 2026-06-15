@@ -123,7 +123,8 @@
           "monitored_load_1_holdoff_minutes": "Monitored load 1 — headroom holdoff after power drops (min)",
           "solax_max_charge": "Solax max charge power (W)",
           "solax_max_discharge": "Solax max discharge power (W)",
-          "solax_cmd_deadband": "Solax command deadband (W)"
+          "solax_cmd_deadband": "Solax command deadband (W)",
+          "solax_tier1_share": "Solax tier-1 share (0–0.5)"
         },
         "data_description": {
           "test_mode": "When enabled, simulated entities are created for all signals. Disabling removes them on next reload.",
@@ -141,7 +142,8 @@
           "monitored_load_1_holdoff_minutes": "Minutes load must be off before headroom is released.",
           "solax_max_charge": "Physical charge power limit of the Solax inverter. Default 2400 W for X1 AC G3.",
           "solax_max_discharge": "Physical discharge power limit of the Solax inverter. Default 2400 W for X1 AC G3.",
-          "solax_cmd_deadband": "Only update the Solax power setpoint when the new command differs from the last written value by at least this amount. The autorepeat trigger is always pressed. Default 50 W."
+          "solax_cmd_deadband": "Only update the Solax power setpoint when the new command differs from the last written value by at least this amount. The autorepeat trigger is always pressed. Default 50 W.",
+          "solax_tier1_share": "Fraction of the EMHASS battery setpoint that Solax executes in parallel with Voltx (0 = disabled, 0.25 = Solax takes 25%). Voltx executes the remainder plus tier-2 correction. Ignored when Voltx is SOC-bounded (Solax covers residual error instead). Default 0."
         }
       },
       "entities": {

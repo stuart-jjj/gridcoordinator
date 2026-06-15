@@ -41,6 +41,7 @@ from .const import (
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOLAX_CMD_DEADBAND,
+    CONF_SOLAX_TIER1_SHARE,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TEST_MODE,
@@ -59,6 +60,7 @@ from .const import (
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOLAX_CMD_DEADBAND,
+    DEFAULT_SOLAX_TIER1_SHARE,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TIER2_GAIN,
@@ -141,6 +143,10 @@ def _params_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_SOLAX_CMD_DEADBAND, default=defaults.get(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=500, step=10, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_SOLAX_TIER1_SHARE, default=defaults.get(CONF_SOLAX_TIER1_SHARE, DEFAULT_SOLAX_TIER1_SHARE)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0.0, max=0.5, step=0.05, mode=_NUM,
                 )),
         }
     )
@@ -295,6 +301,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_SOLAX_MAX_CHARGE: self._current(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE),
             CONF_SOLAX_MAX_DISCHARGE: self._current(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE),
             CONF_SOLAX_CMD_DEADBAND: self._current(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND),
+            CONF_SOLAX_TIER1_SHARE: self._current(CONF_SOLAX_TIER1_SHARE, DEFAULT_SOLAX_TIER1_SHARE),
         }
         return self.async_show_form(
             step_id="init",

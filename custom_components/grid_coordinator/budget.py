@@ -156,6 +156,39 @@ def compute_voltx_command(
     return round(final_cmd), mode, diag
 
 
+def compute_solax_tier1(
+    *,
+    mpc_batt_cmd: float,
+    share: float,
+    solax_soc: float,
+    solax_soc_min: float,
+    solax_soc_max: float,
+    solax_max_charge: float,
+    solax_max_discharge: float,
+) -> tuple[float, SolaxMode]:
+    """Compute Solax command as a direct share of the EMHASS battery setpoint.
+
+    Used when Voltx is in normal tracking (not SOC-bounded): Solax executes
+    (share × mpc_batt_cmd), while Voltx executes the remaining (1−share) fraction
+    plus the tier-2 grid correction.  SOC limits and inverter physical limits apply;
+    no grid-safety clamp (Voltx's computation already accounts for the full plan).
+    """
+    raw_cmd = mpc_batt_cmd * share
+
+    if raw_cmd > 0 and solax_soc <= solax_soc_min:
+        return 0.0, SolaxMode.SOC_FLOOR
+    if raw_cmd < 0 and solax_soc >= solax_soc_max:
+        return 0.0, SolaxMode.SOC_CEILING
+
+    raw_cmd = max(-solax_max_charge, min(solax_max_discharge, raw_cmd))
+
+    if raw_cmd > 0:
+        return float(round(raw_cmd)), SolaxMode.FORCE_DISCHARGE
+    if raw_cmd < 0:
+        return float(round(raw_cmd)), SolaxMode.FORCE_CHARGE
+    return 0.0, SolaxMode.SELF_CONSUMPTION
+
+
 def compute_solax_command(
     *,
     voltx_mode: CoordinatorMode,

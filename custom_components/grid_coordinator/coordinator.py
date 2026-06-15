@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .budget import build_coordinator_data, compute_solax_command, compute_voltx_command
+from .budget import build_coordinator_data, compute_solax_command, compute_solax_tier1, compute_voltx_command
 from .const import (
     CONF_ENTITY_ENABLED,
     CONF_ENTITY_EV_CHARGER,
@@ -44,6 +44,7 @@ from .const import (
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOLAX_CMD_DEADBAND,
+    CONF_SOLAX_TIER1_SHARE,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TIER2_GAIN,
@@ -63,6 +64,7 @@ from .const import (
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOLAX_AUTOREPEAT_DURATION,
     DEFAULT_SOLAX_CMD_DEADBAND,
+    DEFAULT_SOLAX_TIER1_SHARE,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TIER2_GAIN,
@@ -234,6 +236,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @property
     def _tier2_gain(self) -> float:
         return float(self._opt(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN))
+
+    @property
+    def _solax_tier1_share(self) -> float:
+        return float(self._opt(CONF_SOLAX_TIER1_SHARE, DEFAULT_SOLAX_TIER1_SHARE))
 
     # ── feature helpers ───────────────────────────────────────────────────────
 
@@ -430,11 +436,16 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         headroom_reserve = self._headroom_reserve(hass)
 
         # ── compute command (pure function, no HA calls) ───────────────────
+        # When Solax is taking a tier-1 share, reduce Voltx's mpc_batt proportionally
+        # so their combined output equals the EMHASS-planned mpc_batt_cmd.
+        solax_share = self._solax_tier1_share if self._solax_enabled() else 0.0
+        voltx_mpc_batt = effective_mpc_batt * (1.0 - solax_share)
+
         prev_cmd = self._prev_cmd  # capture for logging before it is overwritten
         command, mode, diag = compute_voltx_command(
             grid_actual=grid_actual,
             grid_target=effective_target,
-            mpc_batt_cmd=effective_mpc_batt,
+            mpc_batt_cmd=voltx_mpc_batt,
             prev_cmd=self._prev_cmd,
             soc=soc,
             soc_min=effective_soc_min,
@@ -470,19 +481,34 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
             solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
-            solax_cmd, solax_mode = compute_solax_command(
-                voltx_mode=mode,
-                grid_after_voltx=grid_after_voltx,
-                grid_target=effective_target,
-                solax_soc=solax_soc,
-                solax_soc_min=solax_soc_min,
-                solax_soc_max=solax_soc_max,
-                solax_max_charge=solax_max_charge,
-                solax_max_discharge=solax_max_discharge,
-                import_limit=self._import_limit,
-                export_limit=self._export_limit,
-                prev_solax_cmd=self._solax_last_written_cmd,
-            )
+            if mode in (CoordinatorMode.SOC_FLOOR, CoordinatorMode.SOC_CEILING):
+                # Voltx is SOC-bounded: Solax covers the residual tracking error.
+                solax_cmd, solax_mode = compute_solax_command(
+                    voltx_mode=mode,
+                    grid_after_voltx=grid_after_voltx,
+                    grid_target=effective_target,
+                    solax_soc=solax_soc,
+                    solax_soc_min=solax_soc_min,
+                    solax_soc_max=solax_soc_max,
+                    solax_max_charge=solax_max_charge,
+                    solax_max_discharge=solax_max_discharge,
+                    import_limit=self._import_limit,
+                    export_limit=self._export_limit,
+                    prev_solax_cmd=self._solax_last_written_cmd,
+                )
+            elif solax_share > 0:
+                # Voltx in normal tracking: Solax executes its tier-1 share of mpc_batt_cmd.
+                solax_cmd, solax_mode = compute_solax_tier1(
+                    mpc_batt_cmd=effective_mpc_batt,
+                    share=solax_share,
+                    solax_soc=solax_soc,
+                    solax_soc_min=solax_soc_min,
+                    solax_soc_max=solax_soc_max,
+                    solax_max_charge=solax_max_charge,
+                    solax_max_discharge=solax_max_discharge,
+                )
+            else:
+                solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
             await self._async_write_solax(solax_cmd)
         else:
             solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
