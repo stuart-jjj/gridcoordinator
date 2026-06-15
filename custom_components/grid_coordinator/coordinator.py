@@ -481,8 +481,13 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
             solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
-            if mode in (CoordinatorMode.SOC_FLOOR, CoordinatorMode.SOC_CEILING):
-                # Voltx is SOC-bounded: Solax covers the residual tracking error.
+            if mode in (
+                CoordinatorMode.SOC_FLOOR,
+                CoordinatorMode.SOC_CEILING,
+                CoordinatorMode.CHARGE_LIMIT,
+                CoordinatorMode.DISCHARGE_LIMIT,
+            ):
+                # Voltx is constrained (SOC boundary or physical limit): Solax covers the residual.
                 solax_cmd, solax_mode = compute_solax_command(
                     voltx_mode=mode,
                     grid_after_voltx=grid_after_voltx,

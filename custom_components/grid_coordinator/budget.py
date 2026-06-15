@@ -205,8 +205,8 @@ def compute_solax_command(
 ) -> tuple[float, SolaxMode]:
     """Compute the Solax priority-2 battery command for one 10 s tick.
 
-    Only activates when Voltx is at a SOC boundary (SOC_FLOOR or SOC_CEILING) and
-    there is a residual tracking error Voltx cannot cover.
+    Only activates when Voltx is constrained (SOC_FLOOR, SOC_CEILING, CHARGE_LIMIT,
+    or DISCHARGE_LIMIT) and there is a residual tracking error Voltx cannot cover.
 
     Sign convention: same as voltx_command — positive = discharge, negative = charge.
     grid_after_voltx: projected grid power after Voltx command is applied,
@@ -215,7 +215,12 @@ def compute_solax_command(
                       prev_solax_cmd is added back to get the Solax-free baseline
                       before computing raw_cmd — analogous to how Voltx uses prev_cmd.
     """
-    if voltx_mode not in (CoordinatorMode.SOC_FLOOR, CoordinatorMode.SOC_CEILING):
+    if voltx_mode not in (
+        CoordinatorMode.SOC_FLOOR,
+        CoordinatorMode.SOC_CEILING,
+        CoordinatorMode.CHARGE_LIMIT,
+        CoordinatorMode.DISCHARGE_LIMIT,
+    ):
         return 0.0, SolaxMode.SELF_CONSUMPTION
 
     # Undo the current Solax contribution so raw_cmd represents the full residual.
