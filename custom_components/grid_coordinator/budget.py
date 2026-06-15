@@ -22,6 +22,7 @@ def compute_voltx_command(
     plan_is_stale: bool,
     tracking_deadband: float = 0.0,
     headroom_reserve: float = 0.0,
+    tier2_gain: float = 1.0,
 ) -> tuple[float, CoordinatorMode, VoltxDiag]:
     """Compute the Voltx battery command for one 10 s tick.
 
@@ -33,16 +34,20 @@ def compute_voltx_command(
     Two-tier control:
       Tier 1 — EMHASS battery setpoint (mpc_batt_cmd): executes the LP decision variable
                directly, exactly what the optimiser solved for.
-      Tier 2 — Grid correction (grid_actual − grid_target): proportional adjustment for
-               the gap between EMHASS forecast and actual conditions this tick.
+      Tier 2 — Grid correction: proportional adjustment for the gap between EMHASS
+               forecast and actual conditions this tick, scaled by tier2_gain.
 
-      raw_cmd = mpc_batt_cmd + (grid_actual − grid_target)
+      raw_cmd = mpc_batt_cmd + tier2_gain × (grid_actual − grid_target)
 
     When the forecast is accurate (grid_actual ≈ grid_target), correction → 0 and the
     battery tracks mpc_batt_cmd exactly.  When load or solar deviates from the LP
     forecast, the correction term restores grid balance without waiting for the next
     5-minute EMHASS re-solve.  No integral wind-up: the anchor resets to the EMHASS
     plan each tick rather than accumulating prev_cmd.
+
+    tier2_gain < 1.0 damps the correction so it converges geometrically rather than
+    hunting.  At gain=1.0 (legacy) the full error is applied each tick, which can
+    produce a 2-tick oscillation when the ramp step bounds the response.
 
     prev_cmd is still used for:
       - Estimating uncontrolled power: P_uncontrolled ≈ grid_actual + prev_cmd
@@ -64,8 +69,8 @@ def compute_voltx_command(
     cmd_floor = uncontrolled - (import_limit - headroom_reserve)
     cmd_ceil = uncontrolled + export_limit
 
-    # Two-tier: EMHASS battery setpoint + proportional grid correction.
-    raw_cmd = mpc_batt_cmd + (grid_actual - grid_target)
+    # Two-tier: EMHASS battery setpoint + damped proportional grid correction.
+    raw_cmd = mpc_batt_cmd + tier2_gain * (grid_actual - grid_target)
     unclamped_cmd = raw_cmd  # preserved for diagnostics before constraints rewrite it
 
     # Tracking deadband — hold the current command when the grid error is small.

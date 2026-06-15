@@ -44,6 +44,7 @@ from .const import (
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TEST_MODE,
+    CONF_TIER2_GAIN,
     CONF_TRACKING_DEADBAND,
     DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
@@ -60,6 +61,7 @@ from .const import (
     DEFAULT_SOLAX_CMD_DEADBAND,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
+    DEFAULT_TIER2_GAIN,
     DEFAULT_TRACKING_DEADBAND,
     DOMAIN,
     ENTITY_EV_CHARGER,
@@ -107,6 +109,10 @@ def _params_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_TRACKING_DEADBAND, default=defaults.get(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=1000, step=50, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_TIER2_GAIN, default=defaults.get(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0.1, max=1.0, step=0.1, mode=_NUM,
                 )),
             vol.Required(CONF_EV_CHARGER_THRESHOLD, default=defaults.get(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
@@ -281,6 +287,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_SELF_CONSUMPTION_MODE: self._current(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE),
             CONF_SELF_CONSUMPTION_DEADBAND: self._current(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND),
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
+            CONF_TIER2_GAIN: self._current(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN),
             CONF_EV_CHARGER_THRESHOLD: self._current(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD),
             CONF_MON_LOAD_1_THRESHOLD: self._current(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD),
             CONF_MON_LOAD_1_HEADROOM: self._current(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM),

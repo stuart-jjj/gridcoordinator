@@ -46,6 +46,7 @@ from .const import (
     CONF_SOLAX_CMD_DEADBAND,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
+    CONF_TIER2_GAIN,
     CONF_TRACKING_DEADBAND,
     DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
@@ -64,6 +65,7 @@ from .const import (
     DEFAULT_SOLAX_CMD_DEADBAND,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
+    DEFAULT_TIER2_GAIN,
     DEFAULT_TRACKING_DEADBAND,
     DOMAIN,
     ENTITY_EV_CHARGER,
@@ -228,6 +230,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @property
     def _tracking_deadband(self) -> float:
         return float(self._opt(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND))
+
+    @property
+    def _tier2_gain(self) -> float:
+        return float(self._opt(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN))
 
     # ── feature helpers ───────────────────────────────────────────────────────
 
@@ -441,6 +447,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_is_stale=plan_is_stale,
             tracking_deadband=self._tracking_deadband,
             headroom_reserve=headroom_reserve,
+            tier2_gain=self._tier2_gain,
         )
 
         # Remap SOC_FLOOR to EV_CHARGING when the elevated floor was EV-caused.

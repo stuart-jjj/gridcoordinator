@@ -19,6 +19,7 @@ CONF_TEST_MODE = "test_mode"
 CONF_SELF_CONSUMPTION_MODE = "self_consumption_mode"
 CONF_SELF_CONSUMPTION_DEADBAND = "self_consumption_deadband"
 CONF_TRACKING_DEADBAND = "tracking_deadband"
+CONF_TIER2_GAIN = "tier2_gain"
 
 # EV charge awareness
 CONF_ENTITY_EV_CHARGER = "entity_ev_charger"
@@ -52,6 +53,7 @@ DEFAULT_MPC_BATT_SIGN_INVERTED = False  # positive = discharge (matches coordina
 DEFAULT_SELF_CONSUMPTION_MODE = "Self-consumption"  # Voltx Modbus work-mode name
 DEFAULT_SELF_CONSUMPTION_DEADBAND = 50  # W — |grid_target| below this → self-consumption
 DEFAULT_TRACKING_DEADBAND = 200         # W — hold command if grid error is within this band
+DEFAULT_TIER2_GAIN = 0.5                # fraction — damps tier-2 correction to prevent oscillation
 DEFAULT_OVERRIDE_DURATION_MINUTES = 60  # minutes before a manual override auto-expires
 DEFAULT_EV_CHARGER_THRESHOLD = 500      # W — above this the EV is considered charging
 DEFAULT_MON_LOAD_1_THRESHOLD = 10       # W — above this the monitored load is considered on
