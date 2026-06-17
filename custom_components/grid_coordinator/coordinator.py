@@ -14,6 +14,7 @@ from .const import (
     CONF_ENTITY_ENABLED,
     CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
+    CONF_ENTITY_GRID_PRIORITY,
     CONF_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_MON_LOAD_1,
@@ -33,6 +34,7 @@ from .const import (
     CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_EV_CHARGER_THRESHOLD,
     CONF_EXPORT_LIMIT,
+    CONF_GRID_PRIORITY_BAND,
     CONF_IMPORT_LIMIT,
     CONF_MON_LOAD_1_HEADROOM,
     CONF_MON_LOAD_1_HOLDOFF_MINUTES,
@@ -52,6 +54,7 @@ from .const import (
     CONF_TRACKING_DEADBAND,
     DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
+    DEFAULT_GRID_PRIORITY_BAND,
     DEFAULT_IMPORT_LIMIT,
     DEFAULT_MON_LOAD_1_HEADROOM,
     DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES,
@@ -287,6 +290,19 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         return headroom if self._mon_load_1_active else 0.0
 
+    def _grid_priority_active(self, hass: HomeAssistant, grid_target: float) -> bool:
+        """Return True when Voltx should use deadbeat grid tracking this tick.
+
+        Engages when the grid target is within grid_priority_band of zero (band=0
+        disables the auto-trigger) OR when the configured grid-priority entity —
+        a manual input_boolean or a price-derived template boolean — is 'on'.
+        """
+        band = float(self._opt(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND))
+        if band > 0 and abs(grid_target) <= band:
+            return True
+        entity = str(self._opt(CONF_ENTITY_GRID_PRIORITY, "")).strip()
+        return bool(entity) and _str(hass, entity, "off") == "on"
+
     # ── override control ──────────────────────────────────────────────────────
 
     def set_override(
@@ -443,6 +459,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         solax_share = self._solax_tier1_share if self._solax_enabled() else 0.0
         voltx_mpc_batt = effective_mpc_batt * (1.0 - solax_share)
 
+        grid_priority = self._grid_priority_active(hass, effective_target)
+
         prev_cmd = self._prev_cmd  # capture for logging before it is overwritten
         command, mode, diag = compute_voltx_command(
             grid_actual=grid_actual,
@@ -461,6 +479,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             tracking_deadband=self._tracking_deadband,
             headroom_reserve=headroom_reserve,
             tier2_gain=self._tier2_gain,
+            grid_priority=grid_priority,
         )
 
         # Remap SOC_FLOOR to EV_CHARGING when the elevated floor was EV-caused.
@@ -528,7 +547,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "tick | grid=%.0fW (age=%.0fs) target=%.0fW unctrl=%.0fW mpc_batt=%.0fW "
             "prev=%.0fW raw=%.0fW ramped=%.0fW cmd=%.0fW hold=%s mode=%s | "
             "floor=%.0fW ceil=%.0fW maxc=%.0fW maxd=%.0fW soc=%.0f%% [%.0f..%.0f] "
-            "plan_age=%.1fmin stale=%s ev=%s headroom=%.0fW | "
+            "plan_age=%.1fmin stale=%s ev=%s gp=%s headroom=%.0fW | "
             "solax cmd=%.0fW mode=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW",
             grid_actual,
             grid_age_s,
@@ -551,6 +570,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_age,
             plan_is_stale,
             ev_active,
+            grid_priority,
             headroom_reserve,
             solax_cmd,
             solax_mode,

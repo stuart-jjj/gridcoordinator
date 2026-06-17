@@ -11,6 +11,7 @@ from .const import (
     CONF_ENTITY_ENABLED,
     CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
+    CONF_ENTITY_GRID_PRIORITY,
     CONF_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_MON_LOAD_1,
@@ -30,6 +31,7 @@ from .const import (
     CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_EV_CHARGER_THRESHOLD,
     CONF_EXPORT_LIMIT,
+    CONF_GRID_PRIORITY_BAND,
     CONF_IMPORT_LIMIT,
     CONF_MON_LOAD_1_HEADROOM,
     CONF_MON_LOAD_1_HOLDOFF_MINUTES,
@@ -50,6 +52,7 @@ from .const import (
     CONF_TRACKING_DEADBAND,
     DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
+    DEFAULT_GRID_PRIORITY_BAND,
     DEFAULT_IMPORT_LIMIT,
     DEFAULT_MON_LOAD_1_HEADROOM,
     DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES,
@@ -117,6 +120,10 @@ def _params_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_TIER2_GAIN, default=defaults.get(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0.1, max=1.0, step=0.1, mode=_NUM,
+                )),
+            vol.Required(CONF_GRID_PRIORITY_BAND, default=defaults.get(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=1000, step=50, unit_of_measurement="W", mode=_NUM,
                 )),
             vol.Required(CONF_EV_CHARGER_THRESHOLD, default=defaults.get(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
@@ -190,6 +197,7 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_ENTITY_VOLTX_WORK_MODE, default=defaults.get(CONF_ENTITY_VOLTX_WORK_MODE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_WORK_MODE])): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGER, default=defaults.get(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)): _TEXT,
             vol.Optional(CONF_ENTITY_MON_LOAD_1, default=defaults.get(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)): _TEXT,
+            vol.Optional(CONF_ENTITY_GRID_PRIORITY, default=defaults.get(CONF_ENTITY_GRID_PRIORITY, "")): _TEXT,
         }
     )
 
@@ -300,6 +308,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_SELF_CONSUMPTION_DEADBAND: self._current(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND),
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
             CONF_TIER2_GAIN: self._current(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN),
+            CONF_GRID_PRIORITY_BAND: self._current(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND),
             CONF_EV_CHARGER_THRESHOLD: self._current(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD),
             CONF_MON_LOAD_1_THRESHOLD: self._current(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD),
             CONF_MON_LOAD_1_HEADROOM: self._current(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM),
@@ -334,6 +343,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         # Optional feature entities (not in ENTITY_ID_DEFAULTS; production defaults used)
         entity_defaults[CONF_ENTITY_EV_CHARGER] = self._current(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)
         entity_defaults[CONF_ENTITY_MON_LOAD_1] = self._current(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)
+        entity_defaults[CONF_ENTITY_GRID_PRIORITY] = self._current(CONF_ENTITY_GRID_PRIORITY, "")
 
         return self.async_show_form(
             step_id="entities",

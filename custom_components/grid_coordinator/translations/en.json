@@ -16,6 +16,7 @@
           "self_consumption_deadband": "Self-consumption deadband (W)",
           "tracking_deadband": "Tracking deadband (W)",
           "tier2_gain": "Tier-2 correction gain",
+          "grid_priority_band": "Grid-priority band (W)",
           "ev_charger_threshold": "EV charger detection threshold (W)",
           "monitored_load_1_threshold": "Monitored load 1 — active threshold (W)",
           "monitored_load_1_headroom": "Monitored load 1 — import headroom to reserve (W)",
@@ -33,6 +34,7 @@
           "self_consumption_deadband": "When |grid_target| is within this band of zero, the coordinator hands off to the inverter's native self-consumption mode. Default ±50 W.",
           "tracking_deadband": "If the grid error (actual minus target) is within this band, the battery command is held unchanged. Prevents command chatter from measurement noise and small load fluctuations. Default 200 W.",
           "tier2_gain": "Scales the proportional grid correction (tier 2). At 1.0 the full error is applied each tick, which can cause oscillation. At 0.5 (default) the error is halved each tick, converging smoothly.",
+          "grid_priority_band": "When |grid_target| is within this band, Voltx switches to deadbeat grid tracking — it ignores the EMHASS battery setpoint and adjusts the battery to drive grid exactly to target (no steady-state import). Use in high-price zero-import periods. 0 disables the auto-trigger; it can still be forced via the grid-priority entity. Default 0.",
           "ev_charger_threshold": "When the EV charger sensor exceeds this power, the battery SOC floor is raised to the current SOC + 1 % so the battery cannot discharge to compensate. Grid import absorbs the EV load naturally up to the import limit. Default 500 W.",
           "monitored_load_1_threshold": "When this load sensor exceeds the threshold, headroom is reserved on the grid import. Default 10 W.",
           "monitored_load_1_headroom": "Import headroom (W) to keep available when the monitored load is active. Battery charging is reduced to maintain this margin. Default 6000 W.",
@@ -55,7 +57,8 @@
           "entity_voltx_cmd": "Battery charge/discharge command (number entity)",
           "entity_voltx_work_mode": "Inverter work mode (select entity)",
           "entity_ev_charger": "EV charger power sensor (optional)",
-          "entity_monitored_load_1": "Monitored load 1 power sensor (optional)"
+          "entity_monitored_load_1": "Monitored load 1 power sensor (optional)",
+          "entity_grid_priority": "Grid-priority trigger (optional)"
         },
         "data_description": {
           "entity_grid_power": "Positive = importing from grid. E.g. sensor.iammeter_power_a",
@@ -70,7 +73,8 @@
           "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
           "entity_voltx_work_mode": "Must support the 'Custom' option.",
           "entity_ev_charger": "Power sensor for the EV charger circuit. Leave blank to disable EV charge awareness.",
-          "entity_monitored_load_1": "Power sensor for a large transient load (e.g. oven). Leave blank to disable headroom reservation."
+          "entity_monitored_load_1": "Power sensor for a large transient load (e.g. oven). Leave blank to disable headroom reservation.",
+          "entity_grid_priority": "Boolean entity (input_boolean, switch, or template binary_sensor) that forces deadbeat grid tracking when its state is 'on'. Wire it to a manual toggle or a high-price condition. Leave blank to rely only on the grid-priority band."
         }
       },
       "solax": {
@@ -117,6 +121,7 @@
           "self_consumption_deadband": "Self-consumption deadband (W)",
           "tracking_deadband": "Tracking deadband (W)",
           "tier2_gain": "Tier-2 correction gain",
+          "grid_priority_band": "Grid-priority band (W)",
           "ev_charger_threshold": "EV charger detection threshold (W)",
           "monitored_load_1_threshold": "Monitored load 1 — active threshold (W)",
           "monitored_load_1_headroom": "Monitored load 1 — import headroom to reserve (W)",
@@ -124,6 +129,7 @@
           "solax_max_charge": "Solax max charge power (W)",
           "solax_max_discharge": "Solax max discharge power (W)",
           "solax_cmd_deadband": "Solax command deadband (W)",
+          "solax_zero_deadband": "Solax zero deadband (W)",
           "solax_tier1_share": "Solax tier-1 share (0–0.5)"
         },
         "data_description": {
@@ -136,6 +142,7 @@
           "mpc_batt_sign_inverted": "Enable if mpc_battery_power uses load convention (positive = charge). Default off.",
           "tracking_deadband": "Hold the battery command when the grid error is within this band. Reduces Modbus writes and prevents oscillation from measurement noise.",
           "tier2_gain": "Scales the proportional grid correction. 0.5 (default) halves the error each tick for smooth convergence; 1.0 applies the full error and may oscillate.",
+          "grid_priority_band": "When |grid_target| is within this band, Voltx ignores the EMHASS battery setpoint and tracks grid to target directly (deadbeat, no steady-state import). For high-price zero-import periods. 0 disables the auto-trigger; the grid-priority entity can still force it. Default 0.",
           "ev_charger_threshold": "Battery discharge suppressed when EV charger exceeds this power.",
           "monitored_load_1_threshold": "Headroom reserved when monitored load exceeds this power.",
           "monitored_load_1_headroom": "Import headroom (W) kept available when load is active.",
@@ -143,6 +150,7 @@
           "solax_max_charge": "Physical charge power limit of the Solax inverter. Default 2400 W for X1 AC G3.",
           "solax_max_discharge": "Physical discharge power limit of the Solax inverter. Default 2400 W for X1 AC G3.",
           "solax_cmd_deadband": "Only update the Solax power setpoint when the new command differs from the last written value by at least this amount. The autorepeat trigger is always pressed. Default 50 W.",
+          "solax_zero_deadband": "Suppress Solax commands within ±this of zero, releasing it to self-consumption instead of writing a near-zero setpoint. 0 disables. Default 0.",
           "solax_tier1_share": "Fraction of the EMHASS battery setpoint that Solax executes in parallel with Voltx (0 = disabled, 0.25 = Solax takes 25%). Voltx executes the remainder plus tier-2 correction. Ignored when Voltx is SOC-bounded (Solax covers residual error instead). Default 0."
         }
       },
@@ -162,7 +170,8 @@
           "entity_voltx_cmd": "Battery charge/discharge command",
           "entity_voltx_work_mode": "Inverter work mode",
           "entity_ev_charger": "EV charger power sensor (optional)",
-          "entity_monitored_load_1": "Monitored load 1 power sensor (optional)"
+          "entity_monitored_load_1": "Monitored load 1 power sensor (optional)",
+          "entity_grid_priority": "Grid-priority trigger (optional)"
         },
         "data_description": {
           "entity_grid_power": "Positive = importing from grid.",
@@ -177,7 +186,8 @@
           "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
           "entity_voltx_work_mode": "Must support the 'Custom' option.",
           "entity_ev_charger": "Leave blank to disable EV charge awareness.",
-          "entity_monitored_load_1": "Leave blank to disable headroom reservation."
+          "entity_monitored_load_1": "Leave blank to disable headroom reservation.",
+          "entity_grid_priority": "Boolean entity that forces deadbeat grid tracking when 'on' (manual toggle or high-price condition). Leave blank to rely only on the grid-priority band."
         }
       },
       "solax": {

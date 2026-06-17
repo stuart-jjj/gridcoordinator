@@ -73,6 +73,36 @@ Maximum change in the Voltx command between ticks (10 s). Smooths large step cha
 
 ---
 
+### Grid priority (deadbeat tracking)
+
+The two-tier controller anchors the battery to the EMHASS battery setpoint (`mpc_batt_cmd`) and applies only a *damped* fraction of the grid error. This makes battery tracking accurate but leaves a **steady-state grid offset** when actual load deviates from the forecast:
+
+```
+residual grid error = forecast_error / (1 + tier2_gain)
+```
+
+At `tier2_gain = 0.5` that is one third of any forecast error persisting as grid import — undesirable in high-price periods when EMHASS targets zero import.
+
+**Grid priority** replaces the two-tier blend with **deadbeat grid tracking**:
+
+```
+raw_cmd = uncontrolled − grid_target
+```
+
+This anchors on uncontrolled power instead of the battery setpoint, driving grid to `grid_target` in a single ramp-limited step with **zero steady-state offset and no hunting** (the `+prev_cmd` inside `uncontrolled` cancels the `−cmd` feedback term, giving eigenvalue 0). The battery absorbs whatever the load actually is; the EMHASS battery plan is ignored while active.
+
+It engages two ways (OR):
+
+**`grid_priority_band`** (default: 0 W = auto-trigger disabled)
+When > 0, grid priority engages automatically whenever `|grid_target| ≤ band`. Set to e.g. 50 W to activate during EMHASS zero-import periods.
+
+**`entity_grid_priority`** (optional entity ID)
+When the referenced boolean entity is `on`, grid priority is forced regardless of the band. Wire it to a manual `input_boolean` or a price-derived template binary sensor (e.g. "on when import price > X"). Leave blank to rely only on the band.
+
+While active, the coordinator reports mode `grid_priority`. SOC, inverter, ramp, and grid-safety constraints still apply, and Solax behaves exactly as in normal tracking (tier-1 share, or priority-2 if Voltx hits a constraint).
+
+---
+
 ### Deadbands
 
 There are four distinct deadbands, each serving a different purpose:
@@ -186,6 +216,7 @@ Configured in step 2 of the setup flow. All have production defaults; only chang
 | `entity_voltx_work_mode` | Written to switch between Custom and self-consumption | `select.voltx_inverter_work_mode` |
 | `entity_ev_charger` | EV charger power (optional) | `sensor.iammeter_power_c` |
 | `entity_monitored_load_1` | Monitored load power (optional) | `sensor.oven_energy_monitor_power` |
+| `entity_grid_priority` | Boolean — forces deadbeat grid tracking when `on` (optional) | _(blank)_ |
 
 `entity_soc_min` and `entity_soc_max` can be set to a numeric literal (e.g. `"20"`) instead of an entity ID if you want a fixed value.
 

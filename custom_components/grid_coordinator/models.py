@@ -23,6 +23,7 @@ class CoordinatorMode(StrEnum):
     SELF_CONSUMPTION = "self_consumption"  # grid_target within deadband; inverter in self-consumption mode
     READ_ERROR = "read_error"           # a critical entity was unavailable
     EMHASS_TRACKING = "emhass_tracking"  # normal: following mpc_grid_power
+    GRID_PRIORITY = "grid_priority"     # deadbeat grid tracking; battery setpoint ignored to hold grid_target
     STALE_PLAN = "stale_plan"           # EMHASS plan too old; holding zero grid target
     IMPORT_CEILING = "import_ceiling"   # import limit is the binding constraint
     EXPORT_CEILING = "export_ceiling"   # export limit is the binding constraint

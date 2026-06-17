@@ -23,6 +23,7 @@ def compute_voltx_command(
     tracking_deadband: float = 0.0,
     headroom_reserve: float = 0.0,
     tier2_gain: float = 1.0,
+    grid_priority: bool = False,
 ) -> tuple[float, CoordinatorMode, VoltxDiag]:
     """Compute the Voltx battery command for one 10 s tick.
 
@@ -49,6 +50,18 @@ def compute_voltx_command(
     hunting.  At gain=1.0 (legacy) the full error is applied each tick, which can
     produce a 2-tick oscillation when the ramp step bounds the response.
 
+    grid_priority overrides the two-tier blend entirely with deadbeat grid tracking:
+
+      raw_cmd = uncontrolled − grid_target
+
+    This anchors on uncontrolled power instead of the battery setpoint, so the
+    command drives grid to grid_target in a single ramp-limited step with zero
+    steady-state offset (the +prev_cmd inside `uncontrolled` cancels the −cmd
+    feedback term → eigenvalue 0, no hunting).  Use it when holding the grid to
+    target matters more than executing the EMHASS battery plan — e.g. high-price
+    zero-import periods where the two-tier droop would otherwise leave a residual
+    import of (forecast_error / (1 + tier2_gain)).
+
     prev_cmd is still used for:
       - Estimating uncontrolled power: P_uncontrolled ≈ grid_actual + prev_cmd
       - Ramp limiting: smooth transitions between ticks
@@ -69,8 +82,21 @@ def compute_voltx_command(
     cmd_floor = uncontrolled - (import_limit - headroom_reserve)
     cmd_ceil = uncontrolled + export_limit
 
-    # Two-tier: EMHASS battery setpoint + damped proportional grid correction.
-    raw_cmd = mpc_batt_cmd + tier2_gain * (grid_actual - grid_target)
+    # Base tracking mode reported when no constraint binds.
+    if plan_is_stale:
+        tracking_mode = CoordinatorMode.STALE_PLAN
+    elif grid_priority:
+        tracking_mode = CoordinatorMode.GRID_PRIORITY
+    else:
+        tracking_mode = CoordinatorMode.EMHASS_TRACKING
+
+    if grid_priority:
+        # Deadbeat grid tracking: anchor on uncontrolled power, ignore the battery
+        # setpoint. Drives grid to target in one ramp-limited step, no offset.
+        raw_cmd = uncontrolled - grid_target
+    else:
+        # Two-tier: EMHASS battery setpoint + damped proportional grid correction.
+        raw_cmd = mpc_batt_cmd + tier2_gain * (grid_actual - grid_target)
     unclamped_cmd = raw_cmd  # preserved for diagnostics before constraints rewrite it
 
     # Tracking deadband — hold the current command when the grid error is small.
@@ -93,7 +119,7 @@ def compute_voltx_command(
         elif soc >= soc_max and prev_cmd <= 0:
             mode = CoordinatorMode.SOC_CEILING
         else:
-            mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
+            mode = tracking_mode
         diag = VoltxDiag(
             deadband_hold=True,
             uncontrolled=uncontrolled,
@@ -104,7 +130,7 @@ def compute_voltx_command(
         )
         return round(prev_cmd), mode, diag
 
-    mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.EMHASS_TRACKING
+    mode = tracking_mode
 
     # SOC constraints (checked before inverter limits so mode is set correctly)
     # cmd > 0 = discharge; cmd < 0 = charge
