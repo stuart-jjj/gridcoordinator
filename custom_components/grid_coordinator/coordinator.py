@@ -490,7 +490,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Compute grid_after_voltx before updating prev_cmd so the Solax
         # calculation uses the same uncontrolled estimate as budget.py did.
         grid_after_voltx = grid_actual + self._prev_cmd - command
-        await self._async_write_voltx(command)
+        if command != self._prev_cmd:
+            await self._async_write_voltx(command)
         self._prev_cmd = command
 
         # ── Solax priority-2 command ───────────────────────────────────────
