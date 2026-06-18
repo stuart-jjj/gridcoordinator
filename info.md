@@ -15,4 +15,4 @@ loop.
 Add this repository to HACS as a custom repository with category
 `Integration`, then install Grid Coordinator from HACS.
 
-![Grid Coordinator icon](https://raw.githubusercontent.com/stuart-jjj/gridcoordinator/main-dev/custom_components/grid_coordinator/brand/icon.png)
+![Grid Coordinator icon](https://raw.githubusercontent.com/stuart-jjj/gridcoordinator/main/custom_components/grid_coordinator/brand/icon.png)
