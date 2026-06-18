@@ -23,6 +23,12 @@ CONF_TIER2_GAIN = "tier2_gain"
 CONF_GRID_PRIORITY_BAND = "grid_priority_band"
 CONF_ENTITY_GRID_PRIORITY = "entity_grid_priority"
 
+# Transient (high grid-variance) load damping
+CONF_TRANSIENT_VARIANCE_THRESHOLD = "transient_variance_threshold"
+CONF_TRANSIENT_VARIANCE_WINDOW = "transient_variance_window"
+CONF_TRANSIENT_EMA_ALPHA = "transient_ema_alpha"
+CONF_TRANSIENT_DISCHARGE_RAMP_STEP = "transient_discharge_ramp_step"
+
 # EV charge awareness
 CONF_ENTITY_EV_CHARGER = "entity_ev_charger"
 CONF_EV_CHARGER_THRESHOLD = "ev_charger_threshold"
@@ -57,6 +63,10 @@ DEFAULT_SELF_CONSUMPTION_DEADBAND = 50  # W — |grid_target| below this → sel
 DEFAULT_TRACKING_DEADBAND = 200         # W — hold command if grid error is within this band
 DEFAULT_TIER2_GAIN = 0.5                # fraction — damps tier-2 correction to prevent oscillation
 DEFAULT_GRID_PRIORITY_BAND = 0          # W — |grid_target| ≤ this → deadbeat grid tracking; 0 disables auto-trigger
+DEFAULT_TRANSIENT_VARIANCE_THRESHOLD = 300  # W — rolling grid stdev above this engages transient damping; 0 disables
+DEFAULT_TRANSIENT_VARIANCE_WINDOW = 6        # ticks (×10 s) in the rolling stdev window
+DEFAULT_TRANSIENT_EMA_ALPHA = 0.3            # EMA smoothing of grid for the tracking error during a transient
+DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP = 150  # W/tick — slow ramp limit for discharge increases during a transient
 DEFAULT_OVERRIDE_DURATION_MINUTES = 60  # minutes before a manual override auto-expires
 DEFAULT_EV_CHARGER_THRESHOLD = 500      # W — above this the EV is considered charging
 DEFAULT_MON_LOAD_1_THRESHOLD = 10       # W — above this the monitored load is considered on

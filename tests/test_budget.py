@@ -30,7 +30,8 @@ _DEFAULTS = dict(
 
 
 def cmd(**overrides) -> tuple[float, CoordinatorMode]:
-    return compute_voltx_command(**{**_DEFAULTS, **overrides})
+    command, mode, _diag = compute_voltx_command(**{**_DEFAULTS, **overrides})
+    return command, mode
 
 
 # ── normal tracking ────────────────────────────────────────────────────────────
@@ -58,7 +59,8 @@ def test_negative_error_charges():
 def test_executes_mpc_batt_cmd_directly():
     """When forecast is accurate (grid_actual == grid_target), correction is zero."""
     command, mode = cmd(
-        mpc_batt_cmd=2000.0, grid_actual=1000.0, grid_target=1000.0
+        mpc_batt_cmd=2000.0, grid_actual=1000.0, grid_target=1000.0,
+        ramp_step=5000.0,
     )
     # correction = 1000 - 1000 = 0 → raw_cmd = 2000 + 0 = 2000
     assert command == 2000
@@ -103,15 +105,20 @@ def test_correction_opposes_mpc_batt_cmd():
 
 def test_deadband_holds_command():
     """Command is held unchanged when grid error is within the deadband."""
+    # mpc_batt_cmd matches prev_cmd so the "new plan" guard does not break the hold.
     command, mode = cmd(
-        grid_actual=100.0, grid_target=0.0, prev_cmd=1000.0, tracking_deadband=200.0
+        grid_actual=100.0, grid_target=0.0, prev_cmd=1000.0, mpc_batt_cmd=1000.0,
+        tracking_deadband=200.0,
     )
     assert command == 1000
     assert mode == CoordinatorMode.EMHASS_TRACKING
 
 
 def test_deadband_exact_boundary_holds():
-    assert cmd(grid_actual=200.0, grid_target=0.0, prev_cmd=500.0, tracking_deadband=200.0)[0] == 500
+    assert cmd(
+        grid_actual=200.0, grid_target=0.0, prev_cmd=500.0, mpc_batt_cmd=500.0,
+        tracking_deadband=200.0,
+    )[0] == 500
 
 
 def test_outside_deadband_reacts():
@@ -138,6 +145,96 @@ def test_ramp_down_limits_negative_step():
         grid_actual=-5000.0, grid_target=0.0, prev_cmd=0.0, ramp_step=1500.0
     )
     assert command == -1500
+
+
+# ── transient (high grid-variance) damping ─────────────────────────────────────
+
+
+def test_transient_tracks_smoothed_grid_not_raw():
+    """When damping is engaged the correction uses grid_smoothed, not the raw spike."""
+    command, mode = cmd(
+        grid_actual=2000.0,        # raw spike (oven element on)
+        grid_smoothed=500.0,       # EMA of the average load
+        grid_target=0.0,
+        transient_active=True,
+        ramp_step=5000.0,
+        discharge_ramp_step=5000.0,  # large so the asymmetric cap does not bind here
+    )
+    # raw_cmd = 0 + 1.0 * (500 - 0) = 500, tracking the average not the 2000 W spike
+    assert command == 500
+    assert mode == CoordinatorMode.EMHASS_TRACKING
+
+
+def test_transient_ignored_when_inactive():
+    """grid_smoothed is ignored unless transient_active is set (backward compatible)."""
+    command, _ = cmd(
+        grid_actual=2000.0,
+        grid_smoothed=500.0,
+        grid_target=0.0,
+        transient_active=False,
+        ramp_step=5000.0,
+    )
+    # Uses raw grid → 2000 W discharge
+    assert command == 2000
+
+
+def test_transient_caps_discharge_increase():
+    """Discharge increases are limited to discharge_ramp_step during a transient."""
+    command, _ = cmd(
+        grid_actual=3000.0,
+        grid_smoothed=3000.0,
+        grid_target=0.0,
+        prev_cmd=0.0,
+        transient_active=True,
+        ramp_step=1500.0,
+        discharge_ramp_step=150.0,
+    )
+    # raw_cmd = 3000, but discharge ramp-up is capped at 150 W/tick
+    assert command == 150
+
+
+def test_transient_allows_fast_discharge_decrease():
+    """Discharge decreases keep the normal (fast) ramp so export is shed quickly."""
+    command, _ = cmd(
+        grid_actual=0.0,
+        grid_smoothed=0.0,        # element switched off; battery should back off
+        grid_target=0.0,
+        prev_cmd=2000.0,          # battery still parked high from the peak
+        transient_active=True,
+        ramp_step=1500.0,
+        discharge_ramp_step=150.0,
+    )
+    # delta = 0 - 2000 = -2000, limited by the fast ramp_step (1500), not the 150 cap
+    assert command == 500
+
+
+def test_transient_diag_flag_set():
+    """The transient flag is surfaced in diagnostics for logging."""
+    _, _, diag = compute_voltx_command(
+        **{**_DEFAULTS, "grid_actual": 1000.0, "transient_active": True, "discharge_ramp_step": 150.0}
+    )
+    assert diag.transient_active is True
+
+
+def test_transient_deadband_still_enforces_grid_limit():
+    """A raw grid spike inside the smoothed deadband must not bypass the import clamp.
+
+    With damping the deadband is tested on grid_smoothed, so a raw spike can sit
+    within the deadband while the raw grid exceeds the import limit. The held
+    command must still be clamped to the hard grid-safety limit (raw grid based).
+    """
+    command, mode = cmd(
+        grid_actual=15000.0,       # raw spike well above the 12000 W import limit
+        grid_smoothed=0.0,         # smoothed value in deadband → would normally hold
+        grid_target=0.0,
+        prev_cmd=0.0,
+        mpc_batt_cmd=0.0,
+        tracking_deadband=200.0,
+        transient_active=True,
+    )
+    # cmd_floor = uncontrolled - import_limit = 15000 - 12000 = 3000; prev_cmd=0 is clamped up.
+    assert command == 3000
+    assert mode == CoordinatorMode.IMPORT_CEILING
 
 
 # ── SOC constraints ───────────────────────────────────────────────────────────

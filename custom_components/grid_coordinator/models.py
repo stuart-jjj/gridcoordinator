@@ -55,6 +55,7 @@ class VoltxDiag:
     cmd_floor: float      # grid-safety lower bound incl. headroom reserve (W)
     cmd_ceil: float       # grid-safety upper bound (W)
     ramped_cmd: float     # after SOC/physical limits and ramp, before grid clamp (W)
+    transient_active: bool = False  # True = high grid-variance damping engaged this tick
 
 
 @dataclass(frozen=True)

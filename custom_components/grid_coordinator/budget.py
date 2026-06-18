@@ -24,6 +24,9 @@ def compute_voltx_command(
     headroom_reserve: float = 0.0,
     tier2_gain: float = 1.0,
     grid_priority: bool = False,
+    grid_smoothed: float | None = None,
+    transient_active: bool = False,
+    discharge_ramp_step: float | None = None,
 ) -> tuple[float, CoordinatorMode, VoltxDiag]:
     """Compute the Voltx battery command for one 10 s tick.
 
@@ -74,9 +77,26 @@ def compute_voltx_command(
     headroom_reserve tightens the effective import limit so that the specified
     number of watts remains available for transient loads (e.g. oven spike).
 
+    transient_active engages high grid-variance damping for a rapidly cycling
+    load (oven/cooktop thermostat).  Two effects, both confined to the transient:
+      - The tracking error is driven from grid_smoothed (an EMA of the grid)
+        instead of the raw reading, so the battery tracks the *average* load
+        rather than aliasing the fast on/off cycling.
+      - The ramp becomes asymmetric: discharge *increases* are limited to
+        discharge_ramp_step (slow) while discharge *decreases* keep the normal
+        ramp_step (fast).  This settles the battery toward the load's lower
+        envelope and sheds over-discharge within a tick, killing the export
+        spike that otherwise occurs when the element switches off.
+    Safety quantities (uncontrolled power and the grid-safety clamp) always use
+    the raw instantaneous grid_actual — the smoothing only feeds the correction.
+
     Returns (command_W rounded to int, active_mode, diagnostics).
     """
     uncontrolled = grid_actual + prev_cmd
+    # During a high-variance transient, drive the tracking error from a smoothed
+    # grid value so the battery tracks the average load instead of chasing fast
+    # thermostatic cycling.  Falls back to raw grid when damping is off.
+    grid_track = grid_smoothed if (transient_active and grid_smoothed is not None) else grid_actual
     # Tighten the import floor by headroom_reserve so charging is reduced to keep
     # import capacity available for transient loads (e.g. oven spike).
     cmd_floor = uncontrolled - (import_limit - headroom_reserve)
@@ -96,25 +116,36 @@ def compute_voltx_command(
         raw_cmd = uncontrolled - grid_target
     else:
         # Two-tier: EMHASS battery setpoint + damped proportional grid correction.
-        raw_cmd = mpc_batt_cmd + tier2_gain * (grid_actual - grid_target)
+        raw_cmd = mpc_batt_cmd + tier2_gain * (grid_track - grid_target)
     unclamped_cmd = raw_cmd  # preserved for diagnostics before constraints rewrite it
 
     # Tracking deadband — hold the current command when the grid error is small.
     # Prevents command chatter from measurement noise and small load fluctuations.
-    # Grid safety limits are not re-evaluated here; prev_cmd was already safe.
+    # The held command is still clamped to the hard grid-safety limits below, since
+    # under transient damping the deadband is tested on the smoothed grid.
     # Skip when headroom is active (oven may have just fired) or when mpc_batt_cmd
     # has moved significantly from prev_cmd — a new EMHASS plan must be acted on
     # even when the grid happens to be near target (e.g. solar-powered charging).
-    if (abs(grid_actual - grid_target) <= tracking_deadband
+    if (abs(grid_track - grid_target) <= tracking_deadband
             and abs(mpc_batt_cmd - prev_cmd) <= tracking_deadband
             and headroom_reserve == 0):
-        # Report the binding SOC constraint even in deadband so Solax knows Voltx is bounded.
+        # Hold the current command, but still enforce the hard grid-safety limits
+        # against the *raw* grid (cmd_floor/cmd_ceil derive from raw uncontrolled).
+        # With transient damping the deadband is tested on grid_track (smoothed), so
+        # a raw grid spike can sit outside the limits while the smoothed value is
+        # within deadband — clamp here so the safety guarantee always holds.
+        held_cmd = max(cmd_floor, min(cmd_ceil, prev_cmd))
+        # Report the binding constraint even in deadband so Solax knows Voltx is bounded.
         # Without this, Solax successfully brings grid near target → deadband fires →
         # mode=emhass_tracking → Solax released → grid shoots up again (2-tick oscillation).
-        # Guard with prev_cmd direction: only propagate SOC_FLOOR when Voltx was already
+        # Guard SOC with prev_cmd direction: only propagate SOC_FLOOR when Voltx was already
         # zeroed/discharging (prev_cmd >= 0). If Voltx is actively charging (prev_cmd < 0)
         # the SOC floor is not the binding constraint and Solax should stay idle.
-        if soc <= soc_min and prev_cmd >= 0:
+        if held_cmd > prev_cmd + 1:
+            mode = CoordinatorMode.IMPORT_CEILING
+        elif held_cmd < prev_cmd - 1:
+            mode = CoordinatorMode.EXPORT_CEILING
+        elif soc <= soc_min and prev_cmd >= 0:
             mode = CoordinatorMode.SOC_FLOOR
         elif soc >= soc_max and prev_cmd <= 0:
             mode = CoordinatorMode.SOC_CEILING
@@ -126,9 +157,10 @@ def compute_voltx_command(
             raw_cmd=unclamped_cmd,
             cmd_floor=cmd_floor,
             cmd_ceil=cmd_ceil,
-            ramped_cmd=prev_cmd,
+            ramped_cmd=held_cmd,
+            transient_active=transient_active,
         )
-        return round(prev_cmd), mode, diag
+        return round(held_cmd), mode, diag
 
     mode = tracking_mode
 
@@ -149,9 +181,14 @@ def compute_voltx_command(
         raw_cmd = max_discharge
         mode = CoordinatorMode.DISCHARGE_LIMIT
 
-    # Ramp — smooth transitions; grid safety clamp below can override it
+    # Ramp — smooth transitions; grid safety clamp below can override it.
+    # During a transient the ramp is asymmetric: discharge increases (delta > 0)
+    # are limited to the slower discharge_ramp_step so the battery does not latch
+    # to load peaks, while discharge decreases (delta < 0) keep the fast ramp_step
+    # so any over-discharge into export is shed within a single tick.
+    up_step = discharge_ramp_step if (transient_active and discharge_ramp_step is not None) else ramp_step
     delta = raw_cmd - prev_cmd
-    ramped_cmd = prev_cmd + max(-ramp_step, min(ramp_step, delta))
+    ramped_cmd = prev_cmd + max(-ramp_step, min(up_step, delta))
 
     # Hard grid limit clamp — overrides ramp if needed to stay within limits
     final_cmd = max(cmd_floor, min(cmd_ceil, ramped_cmd))
@@ -178,6 +215,7 @@ def compute_voltx_command(
         cmd_floor=cmd_floor,
         cmd_ceil=cmd_ceil,
         ramped_cmd=ramped_cmd,
+        transient_active=transient_active,
     )
     return round(final_cmd), mode, diag
 

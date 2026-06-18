@@ -50,6 +50,10 @@ from .const import (
     CONF_TEST_MODE,
     CONF_TIER2_GAIN,
     CONF_TRACKING_DEADBAND,
+    CONF_TRANSIENT_DISCHARGE_RAMP_STEP,
+    CONF_TRANSIENT_EMA_ALPHA,
+    CONF_TRANSIENT_VARIANCE_THRESHOLD,
+    CONF_TRANSIENT_VARIANCE_WINDOW,
     DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_GRID_PRIORITY_BAND,
@@ -70,6 +74,10 @@ from .const import (
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TIER2_GAIN,
     DEFAULT_TRACKING_DEADBAND,
+    DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP,
+    DEFAULT_TRANSIENT_EMA_ALPHA,
+    DEFAULT_TRANSIENT_VARIANCE_THRESHOLD,
+    DEFAULT_TRANSIENT_VARIANCE_WINDOW,
     DOMAIN,
     ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
@@ -124,6 +132,22 @@ def _params_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_GRID_PRIORITY_BAND, default=defaults.get(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=1000, step=50, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_TRANSIENT_VARIANCE_THRESHOLD, default=defaults.get(CONF_TRANSIENT_VARIANCE_THRESHOLD, DEFAULT_TRANSIENT_VARIANCE_THRESHOLD)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=2000, step=50, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_TRANSIENT_VARIANCE_WINDOW, default=defaults.get(CONF_TRANSIENT_VARIANCE_WINDOW, DEFAULT_TRANSIENT_VARIANCE_WINDOW)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=3, max=30, step=1, unit_of_measurement="ticks", mode=_NUM,
+                )),
+            vol.Required(CONF_TRANSIENT_EMA_ALPHA, default=defaults.get(CONF_TRANSIENT_EMA_ALPHA, DEFAULT_TRANSIENT_EMA_ALPHA)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0.1, max=1.0, step=0.05, mode=_NUM,
+                )),
+            vol.Required(CONF_TRANSIENT_DISCHARGE_RAMP_STEP, default=defaults.get(CONF_TRANSIENT_DISCHARGE_RAMP_STEP, DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=50, max=2000, step=50, unit_of_measurement="W/tick", mode=_NUM,
                 )),
             vol.Required(CONF_EV_CHARGER_THRESHOLD, default=defaults.get(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
@@ -309,6 +333,10 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
             CONF_TIER2_GAIN: self._current(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN),
             CONF_GRID_PRIORITY_BAND: self._current(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND),
+            CONF_TRANSIENT_VARIANCE_THRESHOLD: self._current(CONF_TRANSIENT_VARIANCE_THRESHOLD, DEFAULT_TRANSIENT_VARIANCE_THRESHOLD),
+            CONF_TRANSIENT_VARIANCE_WINDOW: self._current(CONF_TRANSIENT_VARIANCE_WINDOW, DEFAULT_TRANSIENT_VARIANCE_WINDOW),
+            CONF_TRANSIENT_EMA_ALPHA: self._current(CONF_TRANSIENT_EMA_ALPHA, DEFAULT_TRANSIENT_EMA_ALPHA),
+            CONF_TRANSIENT_DISCHARGE_RAMP_STEP: self._current(CONF_TRANSIENT_DISCHARGE_RAMP_STEP, DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP),
             CONF_EV_CHARGER_THRESHOLD: self._current(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD),
             CONF_MON_LOAD_1_THRESHOLD: self._current(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD),
             CONF_MON_LOAD_1_HEADROOM: self._current(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM),
