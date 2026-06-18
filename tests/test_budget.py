@@ -216,6 +216,27 @@ def test_transient_diag_flag_set():
     assert diag.transient_active is True
 
 
+def test_transient_deadband_still_enforces_grid_limit():
+    """A raw grid spike inside the smoothed deadband must not bypass the import clamp.
+
+    With damping the deadband is tested on grid_smoothed, so a raw spike can sit
+    within the deadband while the raw grid exceeds the import limit. The held
+    command must still be clamped to the hard grid-safety limit (raw grid based).
+    """
+    command, mode = cmd(
+        grid_actual=15000.0,       # raw spike well above the 12000 W import limit
+        grid_smoothed=0.0,         # smoothed value in deadband → would normally hold
+        grid_target=0.0,
+        prev_cmd=0.0,
+        mpc_batt_cmd=0.0,
+        tracking_deadband=200.0,
+        transient_active=True,
+    )
+    # cmd_floor = uncontrolled - import_limit = 15000 - 12000 = 3000; prev_cmd=0 is clamped up.
+    assert command == 3000
+    assert mode == CoordinatorMode.IMPORT_CEILING
+
+
 # ── SOC constraints ───────────────────────────────────────────────────────────
 
 

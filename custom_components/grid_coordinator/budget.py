@@ -121,20 +121,31 @@ def compute_voltx_command(
 
     # Tracking deadband — hold the current command when the grid error is small.
     # Prevents command chatter from measurement noise and small load fluctuations.
-    # Grid safety limits are not re-evaluated here; prev_cmd was already safe.
+    # The held command is still clamped to the hard grid-safety limits below, since
+    # under transient damping the deadband is tested on the smoothed grid.
     # Skip when headroom is active (oven may have just fired) or when mpc_batt_cmd
     # has moved significantly from prev_cmd — a new EMHASS plan must be acted on
     # even when the grid happens to be near target (e.g. solar-powered charging).
     if (abs(grid_track - grid_target) <= tracking_deadband
             and abs(mpc_batt_cmd - prev_cmd) <= tracking_deadband
             and headroom_reserve == 0):
-        # Report the binding SOC constraint even in deadband so Solax knows Voltx is bounded.
+        # Hold the current command, but still enforce the hard grid-safety limits
+        # against the *raw* grid (cmd_floor/cmd_ceil derive from raw uncontrolled).
+        # With transient damping the deadband is tested on grid_track (smoothed), so
+        # a raw grid spike can sit outside the limits while the smoothed value is
+        # within deadband — clamp here so the safety guarantee always holds.
+        held_cmd = max(cmd_floor, min(cmd_ceil, prev_cmd))
+        # Report the binding constraint even in deadband so Solax knows Voltx is bounded.
         # Without this, Solax successfully brings grid near target → deadband fires →
         # mode=emhass_tracking → Solax released → grid shoots up again (2-tick oscillation).
-        # Guard with prev_cmd direction: only propagate SOC_FLOOR when Voltx was already
+        # Guard SOC with prev_cmd direction: only propagate SOC_FLOOR when Voltx was already
         # zeroed/discharging (prev_cmd >= 0). If Voltx is actively charging (prev_cmd < 0)
         # the SOC floor is not the binding constraint and Solax should stay idle.
-        if soc <= soc_min and prev_cmd >= 0:
+        if held_cmd > prev_cmd + 1:
+            mode = CoordinatorMode.IMPORT_CEILING
+        elif held_cmd < prev_cmd - 1:
+            mode = CoordinatorMode.EXPORT_CEILING
+        elif soc <= soc_min and prev_cmd >= 0:
             mode = CoordinatorMode.SOC_FLOOR
         elif soc >= soc_max and prev_cmd <= 0:
             mode = CoordinatorMode.SOC_CEILING
@@ -146,10 +157,10 @@ def compute_voltx_command(
             raw_cmd=unclamped_cmd,
             cmd_floor=cmd_floor,
             cmd_ceil=cmd_ceil,
-            ramped_cmd=prev_cmd,
+            ramped_cmd=held_cmd,
             transient_active=transient_active,
         )
-        return round(prev_cmd), mode, diag
+        return round(held_cmd), mode, diag
 
     mode = tracking_mode
 

@@ -547,6 +547,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         grid_after_voltx = grid_actual + self._prev_cmd - command
         if command != self._prev_cmd:
             await self._async_write_voltx(command)
+        else:
+            # Setpoint unchanged: skip the redundant power write but still re-assert
+            # Custom work mode (a no-op if already set) so an external mode change
+            # does not silently leave the inverter uncontrolled.
+            await self._async_set_work_mode(VOLTX_WORK_MODE_CUSTOM)
         self._prev_cmd = command
 
         # ── Solax priority-2 command ───────────────────────────────────────
