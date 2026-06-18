@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections import deque
 from datetime import UTC, datetime, timedelta
+from statistics import pstdev
 from typing import TYPE_CHECKING
 
 from homeassistant.core import HomeAssistant
@@ -52,6 +54,10 @@ from .const import (
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TIER2_GAIN,
     CONF_TRACKING_DEADBAND,
+    CONF_TRANSIENT_DISCHARGE_RAMP_STEP,
+    CONF_TRANSIENT_EMA_ALPHA,
+    CONF_TRANSIENT_VARIANCE_THRESHOLD,
+    CONF_TRANSIENT_VARIANCE_WINDOW,
     DEFAULT_EV_CHARGER_THRESHOLD,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_GRID_PRIORITY_BAND,
@@ -74,6 +80,10 @@ from .const import (
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TIER2_GAIN,
     DEFAULT_TRACKING_DEADBAND,
+    DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP,
+    DEFAULT_TRANSIENT_EMA_ALPHA,
+    DEFAULT_TRANSIENT_VARIANCE_THRESHOLD,
+    DEFAULT_TRANSIENT_VARIANCE_WINDOW,
     DOMAIN,
     ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
@@ -153,6 +163,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Solax priority-2 state
         self._solax_active: bool = False  # True when coordinator is commanding Solax
         self._solax_last_written_cmd: float = 0.0  # last power setpoint written to inverter
+        # Transient (high grid-variance) damping state
+        window = max(3, int(self._opt(CONF_TRANSIENT_VARIANCE_WINDOW, DEFAULT_TRANSIENT_VARIANCE_WINDOW)))
+        self._grid_history: deque[float] = deque(maxlen=window)
+        self._grid_ema: float = 0.0
+        self._grid_ema_seeded: bool = False
         # Entities already warned about, so a missing control input logs once not 6×/min
         self._warned_missing: set[str] = set()
         super().__init__(
@@ -245,6 +260,22 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @property
     def _solax_tier1_share(self) -> float:
         return float(self._opt(CONF_SOLAX_TIER1_SHARE, DEFAULT_SOLAX_TIER1_SHARE))
+
+    @property
+    def _transient_variance_threshold(self) -> float:
+        return float(self._opt(CONF_TRANSIENT_VARIANCE_THRESHOLD, DEFAULT_TRANSIENT_VARIANCE_THRESHOLD))
+
+    @property
+    def _transient_variance_window(self) -> int:
+        return max(3, int(self._opt(CONF_TRANSIENT_VARIANCE_WINDOW, DEFAULT_TRANSIENT_VARIANCE_WINDOW)))
+
+    @property
+    def _transient_ema_alpha(self) -> float:
+        return float(self._opt(CONF_TRANSIENT_EMA_ALPHA, DEFAULT_TRANSIENT_EMA_ALPHA))
+
+    @property
+    def _transient_discharge_ramp_step(self) -> float:
+        return float(self._opt(CONF_TRANSIENT_DISCHARGE_RAMP_STEP, DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP))
 
     # ── feature helpers ───────────────────────────────────────────────────────
 
@@ -390,6 +421,27 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 entity_cmd,
             )
 
+        # ── transient (high grid-variance) detection ───────────────────────
+        # Detect a rapidly fluctuating load (e.g. oven/cooktop thermostatic
+        # cycling) from the rolling standard deviation of the grid sensor. When
+        # engaged, compute_voltx_command tracks a smoothed grid value and ramps
+        # discharge up slowly so the battery stops chasing the fast cycling and
+        # over-discharging into export. Threshold 0 disables the feature.
+        alpha = self._transient_ema_alpha
+        if not self._grid_ema_seeded:
+            self._grid_ema = grid_actual
+            self._grid_ema_seeded = True
+        else:
+            self._grid_ema = alpha * grid_actual + (1.0 - alpha) * self._grid_ema
+        window = self._transient_variance_window
+        if self._grid_history.maxlen != window:
+            # Window reconfigured via options without a restart — rebuild, keeping recent samples.
+            self._grid_history = deque(self._grid_history, maxlen=window)
+        self._grid_history.append(grid_actual)
+        variance_threshold = self._transient_variance_threshold
+        grid_stdev = pstdev(self._grid_history) if len(self._grid_history) >= 3 else 0.0
+        transient_active = variance_threshold > 0 and grid_stdev > variance_threshold
+
         # ── manual override ────────────────────────────────────────────────
         # Expire and clear the override if its duration has elapsed.
         if self._override_expires and datetime.now(UTC) >= self._override_expires:
@@ -480,6 +532,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             headroom_reserve=headroom_reserve,
             tier2_gain=self._tier2_gain,
             grid_priority=grid_priority,
+            grid_smoothed=self._grid_ema,
+            transient_active=transient_active,
+            discharge_ramp_step=self._transient_discharge_ramp_step,
         )
 
         # Remap SOC_FLOOR to EV_CHARGING when the elevated floor was EV-caused.
@@ -548,7 +603,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "tick | grid=%.0fW (age=%.0fs) target=%.0fW unctrl=%.0fW mpc_batt=%.0fW "
             "prev=%.0fW raw=%.0fW ramped=%.0fW cmd=%.0fW hold=%s mode=%s | "
             "floor=%.0fW ceil=%.0fW maxc=%.0fW maxd=%.0fW soc=%.0f%% [%.0f..%.0f] "
-            "plan_age=%.1fmin stale=%s ev=%s gp=%s headroom=%.0fW | "
+            "plan_age=%.1fmin stale=%s ev=%s gp=%s headroom=%.0fW "
+            "transient=%s gstdev=%.0fW gema=%.0fW | "
             "solax cmd=%.0fW mode=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW",
             grid_actual,
             grid_age_s,
@@ -573,6 +629,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             ev_active,
             grid_priority,
             headroom_reserve,
+            transient_active,
+            grid_stdev,
+            self._grid_ema,
             solax_cmd,
             solax_mode,
             solax_soc,
