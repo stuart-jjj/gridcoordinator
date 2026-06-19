@@ -44,17 +44,29 @@ pyscript registers its `pyscript.<function>` services *dynamically*, only once t
 
 > The automation … has an unknown action: `pyscript.generate_emhass_mpc`.
 
-This is a benign timing race: the service appears a few seconds later and the runner works for the rest of the session. To stop the error, guard the call so it skips cleanly until the service exists. The most robust place is the **script** (it protects every caller). Add a `condition` as the first step — a script stops without error when a sequence condition is false:
+This is a benign timing race: the service appears a few seconds later and the runner works for the rest of the session. The goal is to skip the call cleanly until the service exists.
+
+There is **no template function to test for a service/action** (`has_service` does not exist — a `condition: template` that references it throws, which HA scores as `false`, so the runner would skip *every* time). `continue_on_error: true` does **not** help either: `ServiceNotFound` is on Home Assistant's explicit re-raise list and is never suppressed.
+
+The reliable signal is one pyscript sets itself. Add a readiness sentinel at the top level of the `.py` file that defines `generate_emhass_mpc` (module-level code runs the moment pyscript finishes compiling the file — i.e. exactly when the service becomes callable):
+
+```python
+state.set("pyscript.emhass_runner_ready", "on")
+```
+
+Then guard the **script** (this protects every caller) with a `condition` as its first step — a script stops without error when a sequence condition is false, and `states()` of a not-yet-created entity returns `unknown`:
 
 ```yaml
 sequence:
   - condition: template
-    value_template: "{{ has_service('pyscript', 'generate_emhass_mpc') }}"
-    alias: Skip if pyscript service not yet loaded (avoids startup race)
+    value_template: "{{ states('pyscript.emhass_runner_ready') == 'on' }}"
+    alias: Skip until pyscript has loaded (avoids startup race)
   # … remaining steps (read settings, call pyscript.generate_emhass_mpc, publish) …
 ```
 
 Missing one cycle during boot is harmless — the next scheduled run fires once pyscript is up, and `plan_stale_minutes` (default 20 min) tolerates several missed solves.
+
+> **Cleaner alternative:** move the schedule *into* pyscript with a `@time_trigger` decorator and drop the HA automation/script. A pyscript time-trigger cannot fire until pyscript has loaded, so the race disappears by construction.
 
 ---
 
