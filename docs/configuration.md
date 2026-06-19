@@ -28,6 +28,36 @@ If your EMHASS instance uses the opposite convention (positive = export / positi
 
 ---
 
+## External dependency: EMHASS runner
+
+This integration **consumes** the EMHASS MPC plan — it reads `sensor.mpc_grid_power` and `sensor.mpc_batt_power` (see [Entity IDs](#entity-ids)) every 10 s and tracks them. It does **not** produce them. You must run EMHASS yourself and publish the result into those `sensor.mpc_*` entities on a schedule. The integration only applies `plan_stale_minutes` if those sensors stop updating.
+
+A typical setup is a time-pattern automation that calls a script, which calls a [pyscript](https://github.com/custom-components/pyscript) function to build the forecasts, run the EMHASS optimiser, and publish the sensors:
+
+```
+automation (time_pattern /5 min)  →  script  →  pyscript.generate_emhass_mpc  →  sensor.mpc_*
+```
+
+### Startup-race guard
+
+pyscript registers its `pyscript.<function>` services *dynamically*, only once the pyscript integration has finished loading. If your runner fires during the Home Assistant startup window — before pyscript is ready — HA reports:
+
+> The automation … has an unknown action: `pyscript.generate_emhass_mpc`.
+
+This is a benign timing race: the service appears a few seconds later and the runner works for the rest of the session. To stop the error, guard the call so it skips cleanly until the service exists. The most robust place is the **script** (it protects every caller). Add a `condition` as the first step — a script stops without error when a sequence condition is false:
+
+```yaml
+sequence:
+  - condition: template
+    value_template: "{{ has_service('pyscript', 'generate_emhass_mpc') }}"
+    alias: Skip if pyscript service not yet loaded (avoids startup race)
+  # … remaining steps (read settings, call pyscript.generate_emhass_mpc, publish) …
+```
+
+Missing one cycle during boot is harmless — the next scheduled run fires once pyscript is up, and `plan_stale_minutes` (default 20 min) tolerates several missed solves.
+
+---
+
 ## Controller parameters
 
 ### Grid limits
