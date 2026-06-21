@@ -4,7 +4,9 @@ import pytest
 
 from custom_components.grid_coordinator.budget import (
     build_coordinator_data,
+    compute_ev_current_limit,
     compute_solax_command,
+    compute_solax_tier1,
     compute_voltx_command,
 )
 from custom_components.grid_coordinator.models import CoordinatorData, CoordinatorMode, SolaxMode
@@ -485,6 +487,154 @@ def test_solax_discharge_clamped_by_export_limit():
     projected = -9500.0 - cmd
     assert projected >= -10000.0
     assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+def test_solax_headroom_floor_reclamped_to_physical_limit():
+    """The headroom-tightened grid floor must not command more discharge than the inverter
+    can deliver — the final command stays within solax_max_discharge."""
+    # grid_without_solax = 10000; tightened floor = 10000 - (10000 - 3000) = 3000 W,
+    # which exceeds the 2400 W inverter limit → must re-clamp to 2400.
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.DISCHARGE_LIMIT,
+        grid_after_voltx=10000.0,
+        grid_target=0.0,
+        import_limit=10000.0,
+        headroom_reserve=3000.0,
+        solax_max_discharge=2400.0,
+    )
+    assert cmd == 2400.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+# ── compute_solax_tier1 ───────────────────────────────────────────────────────
+
+_SOLAX_T1 = dict(
+    mpc_batt_cmd=0.0,
+    share=0.33,
+    solax_soc=50.0,
+    solax_soc_min=20.0,
+    solax_soc_max=95.0,
+    solax_max_charge=2400.0,
+    solax_max_discharge=2400.0,
+    grid_after_voltx=0.0,
+    import_limit=10000.0,
+    export_limit=10000.0,
+    headroom_reserve=3000.0,
+    suppress_charge=False,
+    prev_solax_cmd=0.0,
+)
+
+
+def solax_t1(**overrides) -> tuple[float, SolaxMode]:
+    return compute_solax_tier1(**{**_SOLAX_T1, **overrides})
+
+
+def test_solax_tier1_charges_share_below_ceiling():
+    """Below the headroom ceiling Solax executes its full share of the charge plan."""
+    # share×mpc = 0.33 × -3000 = -990; grid 2000 is far below the 7000 W ceiling.
+    cmd, mode = solax_t1(mpc_batt_cmd=-3000.0, grid_after_voltx=2000.0)
+    assert cmd == -990.0
+    assert mode == SolaxMode.FORCE_CHARGE
+
+
+def test_solax_tier1_ramps_down_charge_near_ceiling():
+    """As grid nears the ceiling the headroom clamp throttles Solax's charging share."""
+    # grid_without_solax = 6500; floor = 6500 - 7000 = -500 → charge limited to -500.
+    cmd, mode = solax_t1(mpc_batt_cmd=-3000.0, grid_after_voltx=6500.0)
+    assert cmd == -500.0
+    assert mode == SolaxMode.FORCE_CHARGE
+
+
+def test_solax_tier1_suppress_charge_yields_to_voltx():
+    """suppress_charge zeroes any charge (Voltx owns the ceiling) but allows discharge."""
+    cmd, mode = solax_t1(mpc_batt_cmd=-3000.0, grid_after_voltx=6800.0, suppress_charge=True)
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
+def test_solax_tier1_discharges_to_hold_ceiling():
+    """Over the ceiling the headroom floor forces discharge even against a charge plan."""
+    # grid_without_solax = 7500; floor = 7500 - 7000 = 500 → discharge 500 W.
+    cmd, mode = solax_t1(mpc_batt_cmd=-3000.0, grid_after_voltx=7500.0)
+    assert cmd == 500.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+# ── compute_ev_current_limit ──────────────────────────────────────────────────
+
+_EV = dict(
+    projected_grid=8000.0,
+    target_grid=7000.0,
+    ev_power=3680.0,
+    watts_per_amp=230.0,
+    min_current=5.0,
+    max_current=16.0,
+    prev_limit=16.0,
+    release_ramp_step=1.0,
+    release_ready=False,
+)
+
+
+def ev(**overrides) -> tuple[float, bool]:
+    return compute_ev_current_limit(**{**_EV, **overrides})
+
+
+def test_ev_inactive_below_ceiling():
+    """Grid below the ceiling and not throttling → stays at max, inactive."""
+    limit, active = ev(projected_grid=4000.0, prev_limit=16.0)
+    assert limit == 16.0
+    assert active is False
+
+
+def test_ev_engages_and_sheds_overshoot():
+    """Over the ceiling, current is cut to shed exactly the overshoot from the EV."""
+    # overshoot = 9300 - 7000 = 2300; new = (3680 - 2300) / 230 = 6 A.
+    limit, active = ev(projected_grid=9300.0, ev_power=3680.0, prev_limit=16.0)
+    assert limit == pytest.approx(6.0)
+    assert active is True
+
+
+def test_ev_ratchets_down_only():
+    """While over the ceiling the cap only lowers, never raises, even as the EV obeys."""
+    # overshoot = 7460 - 7000 = 460; target = (2760 - 460) / 230 = 10; min(prev=12, 10) = 10.
+    limit, active = ev(projected_grid=7460.0, ev_power=2760.0, prev_limit=12.0)
+    assert limit == pytest.approx(10.0)
+    assert active is True
+
+
+def test_ev_overshoot_exceeds_ev_power_clamps_to_min():
+    """A huge overshoot drives the target below zero; result floors at min_current."""
+    limit, active = ev(projected_grid=12000.0, ev_power=1000.0, prev_limit=8.0)
+    assert limit == 5.0
+    assert active is True
+
+
+def test_ev_holds_during_release_holdoff():
+    """Recovered but holdoff not yet satisfied → hold the cap, still active."""
+    limit, active = ev(projected_grid=6500.0, prev_limit=5.0, release_ready=False)
+    assert limit == 5.0
+    assert active is True
+
+
+def test_ev_releases_ramps_up_when_ready():
+    """Sustained recovery ramps the cap back up by release_ramp_step."""
+    limit, active = ev(projected_grid=6500.0, prev_limit=5.0, release_ready=True)
+    assert limit == 6.0
+    assert active is True
+
+
+def test_ev_release_reaches_max_deactivates():
+    """Once the cap is back at max, the throttle reports inactive (handed back)."""
+    limit, active = ev(projected_grid=6500.0, prev_limit=15.0, release_ready=True)
+    assert limit == 16.0
+    assert active is False
+
+
+def test_ev_never_exceeds_max():
+    """The ramp-up never overshoots max_current."""
+    limit, active = ev(projected_grid=6500.0, prev_limit=16.0, release_ready=True)
+    assert limit == 16.0
+    assert active is False
 
 
 # ── build_coordinator_data ────────────────────────────────────────────────────

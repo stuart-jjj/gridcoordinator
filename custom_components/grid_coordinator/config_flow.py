@@ -181,7 +181,7 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 )),
             vol.Required(CONF_EV_MIN_CHARGE_CURRENT, default=defaults.get(CONF_EV_MIN_CHARGE_CURRENT, DEFAULT_EV_MIN_CHARGE_CURRENT)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
-                    min=0, max=32, step=1, unit_of_measurement="A", mode=_NUM,
+                    min=5, max=32, step=1, unit_of_measurement="A", mode=_NUM,
                 )),
             vol.Required(CONF_EV_MAX_CHARGE_CURRENT, default=defaults.get(CONF_EV_MAX_CHARGE_CURRENT, DEFAULT_EV_MAX_CHARGE_CURRENT)):
                 selector.NumberSelector(selector.NumberSelectorConfig(

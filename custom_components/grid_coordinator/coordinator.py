@@ -940,10 +940,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         Returns (current_limit_written_or_None, throttle_active).
         """
-        if not bool(self._opt(CONF_EV_EMERGENCY_THROTTLE, DEFAULT_EV_EMERGENCY_THROTTLE)):
-            return None, False
+        enabled = bool(self._opt(CONF_EV_EMERGENCY_THROTTLE, DEFAULT_EV_EMERGENCY_THROTTLE))
         entity = str(self._opt(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)).strip()
-        if not entity:
+        if not enabled or not entity:
+            # Feature turned off (or entity cleared) while a cap is still asserted: release it
+            # so a reduced setpoint is not stranded on the charger. No-op when not throttling.
+            await self._async_release_ev_throttle()
             return None, False
 
         max_current = float(self._opt(CONF_EV_MAX_CHARGE_CURRENT, DEFAULT_EV_MAX_CHARGE_CURRENT))
@@ -1021,7 +1023,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             async with asyncio.timeout(5):
                 await self.hass.services.async_call(
                     "number", "set_value",
-                    {"entity_id": entity_id, "value": str(value)},
+                    {"entity_id": entity_id, "value": value},
                     blocking=True,
                 )
             LOGGER.debug("ev throttle: set %s = %dA", entity_id, value)
