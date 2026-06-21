@@ -603,6 +603,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # ── Solax priority-2 command ───────────────────────────────────────
         prev_solax_cmd = self._solax_last_written_cmd  # capture for logging
         solax_soc = float("nan")
+        solax_path = "off"      # which Solax branch ran this tick (diagnostic)
+        solax_suppress = False  # tier-1 charge yielded because Voltx owns the ceiling
         if self._solax_enabled():
             solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
             solax_soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
@@ -616,6 +618,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 CoordinatorMode.DISCHARGE_LIMIT,
             ):
                 # Voltx is constrained (SOC boundary or physical limit): Solax covers the residual.
+                solax_path = "resid"
                 solax_cmd, solax_mode = compute_solax_command(
                     voltx_mode=mode,
                     grid_after_voltx=grid_after_voltx,
@@ -641,6 +644,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     CoordinatorMode.EV_CHARGING,
                     CoordinatorMode.IMPORT_CEILING,
                 )
+                solax_path = "tier1"
+                solax_suppress = ceiling_binding
                 solax_cmd, solax_mode = compute_solax_tier1(
                     mpc_batt_cmd=effective_mpc_batt,
                     share=solax_share,
@@ -657,10 +662,13 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     prev_solax_cmd=self._solax_last_written_cmd,
                 )
             else:
+                solax_path = "idle"
                 solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
             # Zero deadband: suppress small commands to avoid unnecessary inverter activity.
             solax_zero_deadband = float(self._opt(CONF_SOLAX_ZERO_DEADBAND, DEFAULT_SOLAX_ZERO_DEADBAND))
             if solax_zero_deadband > 0 and abs(solax_cmd) <= solax_zero_deadband:
+                if solax_cmd != 0.0:
+                    solax_path += "(zd)"  # command suppressed by the zero deadband
                 solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
             await self._async_write_solax(solax_cmd)
         else:
@@ -678,9 +686,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "tick | grid=%.0fW (age=%.0fs) target=%.0fW unctrl=%.0fW mpc_batt=%.0fW "
             "prev=%.0fW raw=%.0fW ramped=%.0fW cmd=%.0fW hold=%s mode=%s | "
             "floor=%.0fW ceil=%.0fW maxc=%.0fW maxd=%.0fW soc=%.0f%% [%.0f..%.0f] "
-            "plan_age=%.1fmin stale=%s ev=%s gp=%s headroom=%.0fW "
+            "plan_age=%.1fmin stale=%s ev=%s t2g=%.2f gp=%s headroom=%.0fW "
             "transient=%s gstdev=%.0fW gema=%.0fW | "
-            "solax cmd=%.0fW mode=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW | "
+            "solax cmd=%.0fW mode=%s path=%s supp=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW | "
             "ev_throttle=%s limit=%sA proj_grid=%.0fW",
             grid_actual,
             grid_age_s,
@@ -703,6 +711,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_age,
             plan_is_stale,
             ev_active,
+            effective_tier2_gain,
             grid_priority,
             headroom_reserve,
             transient_active,
@@ -710,6 +719,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self._grid_ema,
             solax_cmd,
             solax_mode,
+            solax_path,
+            solax_suppress,
             solax_soc,
             grid_after_voltx,
             prev_solax_cmd,
@@ -986,6 +997,22 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             release_ready=release_ready,
         )
         self._ev_current_limit = new_limit
+
+        # Diagnostic line for the throttle decision — emitted only when near/over the ceiling
+        # or while a cap is being held/released, so it stays quiet during normal EV charging.
+        overshoot = projected_grid - target_grid
+        if active or self._ev_throttle_active or overshoot > -EV_RELEASE_MARGIN:
+            recovered_s = (
+                (datetime.now(UTC) - self._ev_recovered_since).total_seconds()
+                if self._ev_recovered_since is not None
+                else 0.0
+            )
+            LOGGER.debug(
+                "ev throttle | proj=%.0fW ceil=%.0fW ovr=%+.0fW evP=%.0fW "
+                "limit=%.1fA active=%s rel_ready=%s recovered=%.0fs/%.0fmin",
+                projected_grid, target_grid, overshoot, ev_power,
+                new_limit, active, release_ready, recovered_s, holdoff,
+            )
 
         if active:
             # Re-assert the cap every tick so Amber cannot raise it back between ticks.
