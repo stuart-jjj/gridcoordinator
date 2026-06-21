@@ -32,6 +32,16 @@ CONF_TRANSIENT_DISCHARGE_RAMP_STEP = "transient_discharge_ramp_step"
 # EV charge awareness
 CONF_ENTITY_EV_CHARGER = "entity_ev_charger"
 CONF_EV_CHARGER_THRESHOLD = "ev_charger_threshold"
+CONF_EV_HEADROOM = "ev_headroom"
+
+# EV emergency charge-current throttle (layer-3 backstop; usurps external EV control)
+CONF_ENTITY_EV_CHARGE_CURRENT = "entity_ev_charge_current"
+CONF_EV_EMERGENCY_THROTTLE = "ev_emergency_throttle"
+CONF_EV_WATTS_PER_AMP = "ev_watts_per_amp"
+CONF_EV_MIN_CHARGE_CURRENT = "ev_min_charge_current"
+CONF_EV_MAX_CHARGE_CURRENT = "ev_max_charge_current"
+CONF_EV_RELEASE_HOLDOFF_MINUTES = "ev_release_holdoff_minutes"
+CONF_EV_RELEASE_RAMP_STEP = "ev_release_ramp_step"
 
 # Monitored load 1 headroom
 CONF_ENTITY_MON_LOAD_1 = "entity_monitored_load_1"
@@ -69,6 +79,14 @@ DEFAULT_TRANSIENT_EMA_ALPHA = 0.3            # EMA smoothing of grid for the tra
 DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP = 150  # W/tick — slow ramp limit for discharge increases during a transient
 DEFAULT_OVERRIDE_DURATION_MINUTES = 60  # minutes before a manual override auto-expires
 DEFAULT_EV_CHARGER_THRESHOLD = 500      # W — above this the EV is considered charging
+DEFAULT_EV_HEADROOM = 3000              # W — import headroom reserved below the ceiling while the EV charges
+DEFAULT_EV_EMERGENCY_THROTTLE = False   # off by default — opt-in, it usurps the external EV controller
+DEFAULT_EV_WATTS_PER_AMP = 230          # W/A — single-phase 230 V (use ~690 for 3-phase)
+DEFAULT_EV_MIN_CHARGE_CURRENT = 5       # A — Tesla API minimum
+DEFAULT_EV_MAX_CHARGE_CURRENT = 16      # A — restored on release; set to the charger/circuit maximum
+DEFAULT_EV_RELEASE_HOLDOFF_MINUTES = 2  # minutes grid must stay below the ceiling before releasing
+DEFAULT_EV_RELEASE_RAMP_STEP = 1        # A/tick — gradual restore toward max on release
+EV_RELEASE_MARGIN = 500                 # W below the ceiling before the release timer starts (hysteresis)
 DEFAULT_MON_LOAD_1_THRESHOLD = 10       # W — above this the monitored load is considered on
 DEFAULT_MON_LOAD_1_HEADROOM = 6000      # W — import headroom to reserve when load is on
 DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES = 5  # minutes load must be off before headroom is released
@@ -99,6 +117,7 @@ ENTITY_ENABLED = "input_boolean.emhass_control_active"
 
 # Optional feature entities (production defaults; leave blank to disable the feature)
 ENTITY_EV_CHARGER = "sensor.iammeter_power_c"
+ENTITY_EV_CHARGE_CURRENT = "number.ziggy_charge_current"  # EV charge-current setpoint (A), written only during emergency throttle
 ENTITY_MON_LOAD_1 = "sensor.oven_energy_monitor_power"
 
 # Outputs — Voltx via direct Modbus integration

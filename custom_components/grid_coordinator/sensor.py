@@ -12,7 +12,7 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfPower
+from homeassistant.const import UnitOfElectricCurrent, UnitOfPower
 from homeassistant.core import HomeAssistant
 
 from .coordinator import GridCoordinator
@@ -98,6 +98,15 @@ SENSOR_DESCRIPTIONS: tuple[GridSensorDescription, ...] = (
         name="Solax Mode",
         icon="mdi:state-machine",
         value_fn=lambda d: str(d.solax_mode),
+    ),
+    GridSensorDescription(
+        key="ev_current_limit",
+        name="EV Current Limit",
+        icon="mdi:ev-station",
+        device_class=SensorDeviceClass.CURRENT,
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
+        value_fn=lambda d: d.ev_current_limit,
     ),
 )
 

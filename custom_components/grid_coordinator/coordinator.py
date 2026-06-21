@@ -11,9 +11,16 @@ from typing import TYPE_CHECKING
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .budget import build_coordinator_data, compute_solax_command, compute_solax_tier1, compute_voltx_command
+from .budget import (
+    build_coordinator_data,
+    compute_ev_current_limit,
+    compute_solax_command,
+    compute_solax_tier1,
+    compute_voltx_command,
+)
 from .const import (
     CONF_ENTITY_ENABLED,
+    CONF_ENTITY_EV_CHARGE_CURRENT,
     CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
     CONF_ENTITY_GRID_PRIORITY,
@@ -35,6 +42,13 @@ from .const import (
     CONF_ENTITY_VOLTX_SOC,
     CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_EV_CHARGER_THRESHOLD,
+    CONF_EV_EMERGENCY_THROTTLE,
+    CONF_EV_HEADROOM,
+    CONF_EV_MAX_CHARGE_CURRENT,
+    CONF_EV_MIN_CHARGE_CURRENT,
+    CONF_EV_RELEASE_HOLDOFF_MINUTES,
+    CONF_EV_RELEASE_RAMP_STEP,
+    CONF_EV_WATTS_PER_AMP,
     CONF_EXPORT_LIMIT,
     CONF_GRID_PRIORITY_BAND,
     CONF_IMPORT_LIMIT,
@@ -59,6 +73,13 @@ from .const import (
     CONF_TRANSIENT_VARIANCE_THRESHOLD,
     CONF_TRANSIENT_VARIANCE_WINDOW,
     DEFAULT_EV_CHARGER_THRESHOLD,
+    DEFAULT_EV_EMERGENCY_THROTTLE,
+    DEFAULT_EV_HEADROOM,
+    DEFAULT_EV_MAX_CHARGE_CURRENT,
+    DEFAULT_EV_MIN_CHARGE_CURRENT,
+    DEFAULT_EV_RELEASE_HOLDOFF_MINUTES,
+    DEFAULT_EV_RELEASE_RAMP_STEP,
+    DEFAULT_EV_WATTS_PER_AMP,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_GRID_PRIORITY_BAND,
     DEFAULT_IMPORT_LIMIT,
@@ -85,9 +106,11 @@ from .const import (
     DEFAULT_TRANSIENT_VARIANCE_THRESHOLD,
     DEFAULT_TRANSIENT_VARIANCE_WINDOW,
     DOMAIN,
+    ENTITY_EV_CHARGE_CURRENT,
     ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
     ENTITY_MON_LOAD_1,
+    EV_RELEASE_MARGIN,
     LOGGER,
     SOLAX_RC_MODE_DISABLED,
     SOLAX_RC_MODE_ENABLED,
@@ -163,6 +186,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Solax priority-2 state
         self._solax_active: bool = False  # True when coordinator is commanding Solax
         self._solax_last_written_cmd: float = 0.0  # last power setpoint written to inverter
+        # EV emergency charge-current throttle state (layer-3 backstop)
+        self._ev_throttle_active: bool = False  # True while a current cap is being asserted
+        self._ev_current_limit: float = float(self._opt(CONF_EV_MAX_CHARGE_CURRENT, DEFAULT_EV_MAX_CHARGE_CURRENT))
+        self._ev_recovered_since: datetime | None = None  # grid-below-ceiling timer for release holdoff
         # Transient (high grid-variance) damping state
         window = max(3, int(self._opt(CONF_TRANSIENT_VARIANCE_WINDOW, DEFAULT_TRANSIENT_VARIANCE_WINDOW)))
         self._grid_history: deque[float] = deque(maxlen=window)
@@ -279,21 +306,27 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
     # ── feature helpers ───────────────────────────────────────────────────────
 
-    def _ev_adjusted_soc_min(self, hass: HomeAssistant, soc: float, soc_min: float) -> tuple[float, bool]:
-        """Return (effective_soc_min, ev_active).
+    def _ev_headroom_reserve(self, hass: HomeAssistant) -> tuple[float, bool]:
+        """Return (ev_headroom_reserve, ev_active).
 
-        When the EV charger draws above threshold the SOC floor is raised to
-        soc + 1 % so the battery cannot discharge to compensate.  Grid import
-        absorbs the EV load naturally up to the configured import limit.
+        When the EV charger draws above threshold a block of import headroom
+        (ev_headroom, default 3 kW) is reserved beneath the import ceiling.  Both
+        batteries follow the EMHASS plan normally while projected grid import stays
+        below (import_limit − ev_headroom); as import nears that tightened ceiling
+        they ramp down charging and, if required, discharge to hold it — keeping the
+        reserve free for the externally-controlled (Amber) EV draw, which has no
+        visibility of grid limits.  The reserve is enforced via the same cmd_floor
+        tightening as the monitored-load headroom (see compute_voltx_command /
+        compute_solax_tier1); the battery is no longer SOC-floored during EV charging.
         """
         entity = str(self._opt(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER))
         if not entity:
-            return soc_min, False
+            return 0.0, False
         threshold = float(self._opt(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD))
         ev_power = _float(hass, entity, 0.0)
         if ev_power > threshold:
-            return max(soc_min, soc + 1.0), True
-        return soc_min, False
+            return float(self._opt(CONF_EV_HEADROOM, DEFAULT_EV_HEADROOM)), True
+        return 0.0, False
 
     def _headroom_reserve(self, hass: HomeAssistant) -> float:
         """Return the import headroom (W) to reserve for monitored load 1.
@@ -382,6 +415,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._async_enter_self_consumption()
             if self._solax_enabled() and self._solax_active:
                 await self._async_enter_solax_self_consumption()
+            await self._async_release_ev_throttle()
             self._prev_cmd = 0.0
             return build_coordinator_data(
                 mode=CoordinatorMode.DISABLED,
@@ -449,6 +483,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             self.set_override("auto")
         if self._override_mode is not None:
             plan_age = _plan_age_minutes(hass, entity_mpc)
+            await self._async_release_ev_throttle()
             return await self._async_handle_override(grid_actual, plan_age)
 
         # ── read EMHASS setpoints ──────────────────────────────────────────
@@ -474,6 +509,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             await self._async_enter_self_consumption()
             if self._solax_enabled() and self._solax_active:
                 await self._async_enter_solax_self_consumption()
+            await self._async_release_ev_throttle()
             self._prev_cmd = 0.0
             sc_mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
             LOGGER.debug(
@@ -499,11 +535,14 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         max_charge = _float(hass, entity_max_charge, 5000.0)
         max_discharge = _float(hass, entity_max_discharge, 5000.0)
 
-        # ── EV charge awareness ────────────────────────────────────────────
-        effective_soc_min, ev_active = self._ev_adjusted_soc_min(hass, soc, soc_min)
-
-        # ── monitored load headroom ────────────────────────────────────────
-        headroom_reserve = self._headroom_reserve(hass)
+        # ── EV charge awareness + monitored load headroom ──────────────────
+        # Both reserve a block of import headroom by tightening the effective import
+        # limit.  Take the larger reserve when both are active (protects the worst
+        # case without double-counting).  ev_active is tracked separately so the mode
+        # can be reported as ev_charging when the EV reserve is the binding one.
+        ev_reserve, ev_active = self._ev_headroom_reserve(hass)
+        mon_load_reserve = self._headroom_reserve(hass)
+        headroom_reserve = max(ev_reserve, mon_load_reserve)
 
         # ── compute command (pure function, no HA calls) ───────────────────
         # When Solax is taking a tier-1 share, reduce Voltx's mpc_batt proportionally
@@ -513,6 +552,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         grid_priority = self._grid_priority_active(hass, effective_target)
 
+        # While the EV charges, follow the EMHASS plan (tier 1) without chasing the grid
+        # target (tier 2 off): the EV load is served by grid import, not by draining the
+        # battery.  The ev headroom_reserve still tightens cmd_floor so both batteries ramp
+        # down charging — and discharge if required — to protect the import-headroom ceiling.
+        effective_tier2_gain = 0.0 if ev_active else self._tier2_gain
+
         prev_cmd = self._prev_cmd  # capture for logging before it is overwritten
         command, mode, diag = compute_voltx_command(
             grid_actual=grid_actual,
@@ -520,7 +565,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             mpc_batt_cmd=voltx_mpc_batt,
             prev_cmd=self._prev_cmd,
             soc=soc,
-            soc_min=effective_soc_min,
+            soc_min=soc_min,
             soc_max=soc_max,
             max_charge=max_charge,
             max_discharge=max_discharge,
@@ -530,15 +575,16 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_is_stale=plan_is_stale,
             tracking_deadband=self._tracking_deadband,
             headroom_reserve=headroom_reserve,
-            tier2_gain=self._tier2_gain,
+            tier2_gain=effective_tier2_gain,
             grid_priority=grid_priority,
             grid_smoothed=self._grid_ema,
             transient_active=transient_active,
             discharge_ramp_step=self._transient_discharge_ramp_step,
         )
 
-        # Remap SOC_FLOOR to EV_CHARGING when the elevated floor was EV-caused.
-        if ev_active and mode == CoordinatorMode.SOC_FLOOR and soc > soc_min:
+        # Remap LOAD_HEADROOM to EV_CHARGING when the binding reserve was EV-caused
+        # (EV active and its reserve is the dominant one).
+        if ev_active and mode == CoordinatorMode.LOAD_HEADROOM and ev_reserve >= mon_load_reserve:
             mode = CoordinatorMode.EV_CHARGING
 
         # ── write to Voltx ────────────────────────────────────────────────
@@ -581,10 +627,20 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     solax_max_discharge=solax_max_discharge,
                     import_limit=self._import_limit,
                     export_limit=self._export_limit,
+                    headroom_reserve=headroom_reserve,
                     prev_solax_cmd=self._solax_last_written_cmd,
                 )
-            elif solax_share > 0:
-                # Voltx in normal tracking: Solax executes its tier-1 share of mpc_batt_cmd.
+            elif solax_share > 0 or headroom_reserve > 0:
+                # Voltx in normal tracking (incl. holding a headroom ceiling): Solax executes
+                # its tier-1 share of mpc_batt_cmd, clamped to protect the import headroom so it
+                # ramps down charging — and discharges if required — alongside Voltx.  When Voltx
+                # is already the one holding the ceiling, Solax yields its charging share (it is
+                # computed second) so the two batteries do not round-trip through each other.
+                ceiling_binding = mode in (
+                    CoordinatorMode.LOAD_HEADROOM,
+                    CoordinatorMode.EV_CHARGING,
+                    CoordinatorMode.IMPORT_CEILING,
+                )
                 solax_cmd, solax_mode = compute_solax_tier1(
                     mpc_batt_cmd=effective_mpc_batt,
                     share=solax_share,
@@ -593,6 +649,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     solax_soc_max=solax_soc_max,
                     solax_max_charge=solax_max_charge,
                     solax_max_discharge=solax_max_discharge,
+                    grid_after_voltx=grid_after_voltx,
+                    import_limit=self._import_limit,
+                    export_limit=self._export_limit,
+                    headroom_reserve=headroom_reserve,
+                    suppress_charge=ceiling_binding,
+                    prev_solax_cmd=self._solax_last_written_cmd,
                 )
             else:
                 solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
@@ -604,13 +666,22 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         else:
             solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
 
+        # ── EV emergency charge-current throttle (layer 3) ─────────────────
+        # Projected grid after both batteries: grid_after_voltx still carries the previous
+        # Solax contribution, so replace prev_solax_cmd with this tick's solax_cmd.
+        projected_grid = grid_after_voltx + prev_solax_cmd - solax_cmd
+        ev_current_limit, ev_throttle_active = await self._async_ev_emergency_throttle(
+            projected_grid, ev_active
+        )
+
         LOGGER.debug(
             "tick | grid=%.0fW (age=%.0fs) target=%.0fW unctrl=%.0fW mpc_batt=%.0fW "
             "prev=%.0fW raw=%.0fW ramped=%.0fW cmd=%.0fW hold=%s mode=%s | "
             "floor=%.0fW ceil=%.0fW maxc=%.0fW maxd=%.0fW soc=%.0f%% [%.0f..%.0f] "
             "plan_age=%.1fmin stale=%s ev=%s gp=%s headroom=%.0fW "
             "transient=%s gstdev=%.0fW gema=%.0fW | "
-            "solax cmd=%.0fW mode=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW",
+            "solax cmd=%.0fW mode=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW | "
+            "ev_throttle=%s limit=%sA proj_grid=%.0fW",
             grid_actual,
             grid_age_s,
             grid_target,
@@ -627,7 +698,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             max_charge,
             max_discharge,
             soc,
-            effective_soc_min,
+            soc_min,
             soc_max,
             plan_age,
             plan_is_stale,
@@ -642,6 +713,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_soc,
             grid_after_voltx,
             prev_solax_cmd,
+            ev_throttle_active,
+            f"{ev_current_limit:.0f}" if ev_current_limit is not None else "-",
+            projected_grid,
         )
 
         return build_coordinator_data(
@@ -656,6 +730,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             mpc_batt_power=effective_mpc_batt,
             solax_command=solax_cmd,
             solax_mode=solax_mode,
+            ev_current_limit=ev_current_limit,
+            ev_throttle_active=ev_throttle_active,
         )
 
     # ── override dispatch ─────────────────────────────────────────────────────
@@ -852,6 +928,105 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         finally:
             self._solax_active = False
             self._solax_last_written_cmd = 0.0
+
+    # ── EV emergency charge-current throttle (layer-3 backstop) ────────────────
+
+    async def _async_ev_emergency_throttle(
+        self, projected_grid: float, ev_active: bool
+    ) -> tuple[float | None, bool]:
+        """Cap the EV charge current to hold the import-headroom ceiling when the batteries
+        cannot.  Last resort beneath both battery layers; usurps the external EV controller
+        (Amber) only while engaged, then restores max on release so Amber resumes control.
+
+        Returns (current_limit_written_or_None, throttle_active).
+        """
+        if not bool(self._opt(CONF_EV_EMERGENCY_THROTTLE, DEFAULT_EV_EMERGENCY_THROTTLE)):
+            return None, False
+        entity = str(self._opt(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)).strip()
+        if not entity:
+            return None, False
+
+        max_current = float(self._opt(CONF_EV_MAX_CHARGE_CURRENT, DEFAULT_EV_MAX_CHARGE_CURRENT))
+
+        # EV not charging: stay out of the way, releasing once if we were still throttling.
+        if not ev_active:
+            if self._ev_throttle_active:
+                await self._async_write_ev_current(entity, max_current)
+                self._ev_throttle_active = False
+            self._ev_current_limit = max_current
+            self._ev_recovered_since = None
+            return None, False
+
+        target_grid = self._import_limit - float(self._opt(CONF_EV_HEADROOM, DEFAULT_EV_HEADROOM))
+
+        # Release holdoff: start the timer once grid is comfortably below the ceiling.
+        if projected_grid <= target_grid - EV_RELEASE_MARGIN:
+            if self._ev_recovered_since is None:
+                self._ev_recovered_since = datetime.now(UTC)
+        else:
+            self._ev_recovered_since = None
+        holdoff = float(self._opt(CONF_EV_RELEASE_HOLDOFF_MINUTES, DEFAULT_EV_RELEASE_HOLDOFF_MINUTES))
+        release_ready = (
+            self._ev_recovered_since is not None
+            and (datetime.now(UTC) - self._ev_recovered_since).total_seconds() / 60 >= holdoff
+        )
+
+        ev_power = _float(self.hass, str(self._opt(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)), 0.0)
+        new_limit, active = compute_ev_current_limit(
+            projected_grid=projected_grid,
+            target_grid=target_grid,
+            ev_power=ev_power,
+            watts_per_amp=float(self._opt(CONF_EV_WATTS_PER_AMP, DEFAULT_EV_WATTS_PER_AMP)),
+            min_current=float(self._opt(CONF_EV_MIN_CHARGE_CURRENT, DEFAULT_EV_MIN_CHARGE_CURRENT)),
+            max_current=max_current,
+            prev_limit=self._ev_current_limit,
+            release_ramp_step=float(self._opt(CONF_EV_RELEASE_RAMP_STEP, DEFAULT_EV_RELEASE_RAMP_STEP)),
+            release_ready=release_ready,
+        )
+        self._ev_current_limit = new_limit
+
+        if active:
+            # Re-assert the cap every tick so Amber cannot raise it back between ticks.
+            await self._async_write_ev_current(entity, new_limit)
+            self._ev_throttle_active = True
+            return new_limit, True
+        if self._ev_throttle_active:
+            # Fully recovered: restore max once and hand control back to Amber.
+            await self._async_write_ev_current(entity, max_current)
+            self._ev_throttle_active = False
+            self._ev_recovered_since = None
+        return None, False
+
+    async def _async_release_ev_throttle(self) -> None:
+        """Release any active EV current cap, handing control back to the external charger.
+
+        Called from the control paths that bypass the layer-3 computation (disabled gate,
+        self-consumption, manual override) so a held cap is never left stale on the charger.
+        Cheap no-op when not currently throttling.
+        """
+        if not self._ev_throttle_active:
+            return
+        entity = str(self._opt(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)).strip()
+        max_current = float(self._opt(CONF_EV_MAX_CHARGE_CURRENT, DEFAULT_EV_MAX_CHARGE_CURRENT))
+        if entity:
+            await self._async_write_ev_current(entity, max_current)
+        self._ev_throttle_active = False
+        self._ev_current_limit = max_current
+        self._ev_recovered_since = None
+
+    async def _async_write_ev_current(self, entity_id: str, current: float) -> None:
+        """Write the EV charge-current setpoint (Amps) via number.set_value."""
+        value = int(round(current))
+        try:
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "number", "set_value",
+                    {"entity_id": entity_id, "value": str(value)},
+                    blocking=True,
+                )
+            LOGGER.debug("ev throttle: set %s = %dA", entity_id, value)
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("EV charge-current write failed: %s", err)
 
     # ── inverter write ────────────────────────────────────────────────────────
 

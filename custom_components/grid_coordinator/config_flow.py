@@ -9,6 +9,7 @@ from homeassistant.helpers import selector
 
 from .const import (
     CONF_ENTITY_ENABLED,
+    CONF_ENTITY_EV_CHARGE_CURRENT,
     CONF_ENTITY_EV_CHARGER,
     CONF_ENTITY_GRID_POWER,
     CONF_ENTITY_GRID_PRIORITY,
@@ -30,6 +31,13 @@ from .const import (
     CONF_ENTITY_VOLTX_SOC,
     CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_EV_CHARGER_THRESHOLD,
+    CONF_EV_EMERGENCY_THROTTLE,
+    CONF_EV_HEADROOM,
+    CONF_EV_MAX_CHARGE_CURRENT,
+    CONF_EV_MIN_CHARGE_CURRENT,
+    CONF_EV_RELEASE_HOLDOFF_MINUTES,
+    CONF_EV_RELEASE_RAMP_STEP,
+    CONF_EV_WATTS_PER_AMP,
     CONF_EXPORT_LIMIT,
     CONF_GRID_PRIORITY_BAND,
     CONF_IMPORT_LIMIT,
@@ -55,6 +63,13 @@ from .const import (
     CONF_TRANSIENT_VARIANCE_THRESHOLD,
     CONF_TRANSIENT_VARIANCE_WINDOW,
     DEFAULT_EV_CHARGER_THRESHOLD,
+    DEFAULT_EV_EMERGENCY_THROTTLE,
+    DEFAULT_EV_HEADROOM,
+    DEFAULT_EV_MAX_CHARGE_CURRENT,
+    DEFAULT_EV_MIN_CHARGE_CURRENT,
+    DEFAULT_EV_RELEASE_HOLDOFF_MINUTES,
+    DEFAULT_EV_RELEASE_RAMP_STEP,
+    DEFAULT_EV_WATTS_PER_AMP,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_GRID_PRIORITY_BAND,
     DEFAULT_IMPORT_LIMIT,
@@ -79,6 +94,7 @@ from .const import (
     DEFAULT_TRANSIENT_VARIANCE_THRESHOLD,
     DEFAULT_TRANSIENT_VARIANCE_WINDOW,
     DOMAIN,
+    ENTITY_EV_CHARGE_CURRENT,
     ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
     ENTITY_MON_LOAD_1,
@@ -153,6 +169,32 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=100, max=5000, step=50, unit_of_measurement="W", mode=_NUM,
                 )),
+            vol.Required(CONF_EV_HEADROOM, default=defaults.get(CONF_EV_HEADROOM, DEFAULT_EV_HEADROOM)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=15000, step=500, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_EV_EMERGENCY_THROTTLE, default=defaults.get(CONF_EV_EMERGENCY_THROTTLE, DEFAULT_EV_EMERGENCY_THROTTLE)):
+                selector.BooleanSelector(),
+            vol.Required(CONF_EV_WATTS_PER_AMP, default=defaults.get(CONF_EV_WATTS_PER_AMP, DEFAULT_EV_WATTS_PER_AMP)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=110, max=1000, step=10, unit_of_measurement="W/A", mode=_NUM,
+                )),
+            vol.Required(CONF_EV_MIN_CHARGE_CURRENT, default=defaults.get(CONF_EV_MIN_CHARGE_CURRENT, DEFAULT_EV_MIN_CHARGE_CURRENT)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=32, step=1, unit_of_measurement="A", mode=_NUM,
+                )),
+            vol.Required(CONF_EV_MAX_CHARGE_CURRENT, default=defaults.get(CONF_EV_MAX_CHARGE_CURRENT, DEFAULT_EV_MAX_CHARGE_CURRENT)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=6, max=80, step=1, unit_of_measurement="A", mode=_NUM,
+                )),
+            vol.Required(CONF_EV_RELEASE_RAMP_STEP, default=defaults.get(CONF_EV_RELEASE_RAMP_STEP, DEFAULT_EV_RELEASE_RAMP_STEP)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=1, max=16, step=1, unit_of_measurement="A/tick", mode=_NUM,
+                )),
+            vol.Required(CONF_EV_RELEASE_HOLDOFF_MINUTES, default=defaults.get(CONF_EV_RELEASE_HOLDOFF_MINUTES, DEFAULT_EV_RELEASE_HOLDOFF_MINUTES)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=30, step=1, unit_of_measurement="min", mode=_NUM,
+                )),
             vol.Required(CONF_MON_LOAD_1_THRESHOLD, default=defaults.get(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=1, max=500, step=1, unit_of_measurement="W", mode=_NUM,
@@ -220,6 +262,7 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_ENTITY_VOLTX_CMD, default=defaults.get(CONF_ENTITY_VOLTX_CMD, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_CMD])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_WORK_MODE, default=defaults.get(CONF_ENTITY_VOLTX_WORK_MODE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_WORK_MODE])): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGER, default=defaults.get(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)): _TEXT,
+            vol.Optional(CONF_ENTITY_EV_CHARGE_CURRENT, default=defaults.get(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)): _TEXT,
             vol.Optional(CONF_ENTITY_MON_LOAD_1, default=defaults.get(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)): _TEXT,
             vol.Optional(CONF_ENTITY_GRID_PRIORITY, default=defaults.get(CONF_ENTITY_GRID_PRIORITY, "")): _TEXT,
         }
@@ -338,6 +381,13 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_TRANSIENT_EMA_ALPHA: self._current(CONF_TRANSIENT_EMA_ALPHA, DEFAULT_TRANSIENT_EMA_ALPHA),
             CONF_TRANSIENT_DISCHARGE_RAMP_STEP: self._current(CONF_TRANSIENT_DISCHARGE_RAMP_STEP, DEFAULT_TRANSIENT_DISCHARGE_RAMP_STEP),
             CONF_EV_CHARGER_THRESHOLD: self._current(CONF_EV_CHARGER_THRESHOLD, DEFAULT_EV_CHARGER_THRESHOLD),
+            CONF_EV_HEADROOM: self._current(CONF_EV_HEADROOM, DEFAULT_EV_HEADROOM),
+            CONF_EV_EMERGENCY_THROTTLE: self._current(CONF_EV_EMERGENCY_THROTTLE, DEFAULT_EV_EMERGENCY_THROTTLE),
+            CONF_EV_WATTS_PER_AMP: self._current(CONF_EV_WATTS_PER_AMP, DEFAULT_EV_WATTS_PER_AMP),
+            CONF_EV_MIN_CHARGE_CURRENT: self._current(CONF_EV_MIN_CHARGE_CURRENT, DEFAULT_EV_MIN_CHARGE_CURRENT),
+            CONF_EV_MAX_CHARGE_CURRENT: self._current(CONF_EV_MAX_CHARGE_CURRENT, DEFAULT_EV_MAX_CHARGE_CURRENT),
+            CONF_EV_RELEASE_RAMP_STEP: self._current(CONF_EV_RELEASE_RAMP_STEP, DEFAULT_EV_RELEASE_RAMP_STEP),
+            CONF_EV_RELEASE_HOLDOFF_MINUTES: self._current(CONF_EV_RELEASE_HOLDOFF_MINUTES, DEFAULT_EV_RELEASE_HOLDOFF_MINUTES),
             CONF_MON_LOAD_1_THRESHOLD: self._current(CONF_MON_LOAD_1_THRESHOLD, DEFAULT_MON_LOAD_1_THRESHOLD),
             CONF_MON_LOAD_1_HEADROOM: self._current(CONF_MON_LOAD_1_HEADROOM, DEFAULT_MON_LOAD_1_HEADROOM),
             CONF_MON_LOAD_1_HOLDOFF_MINUTES: self._current(CONF_MON_LOAD_1_HOLDOFF_MINUTES, DEFAULT_MON_LOAD_1_HOLDOFF_MINUTES),
@@ -370,6 +420,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             entity_defaults = {k: self._current(k, prod_id) for k, prod_id in ENTITY_ID_DEFAULTS.items()}
         # Optional feature entities (not in ENTITY_ID_DEFAULTS; production defaults used)
         entity_defaults[CONF_ENTITY_EV_CHARGER] = self._current(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)
+        entity_defaults[CONF_ENTITY_EV_CHARGE_CURRENT] = self._current(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)
         entity_defaults[CONF_ENTITY_MON_LOAD_1] = self._current(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)
         entity_defaults[CONF_ENTITY_GRID_PRIORITY] = self._current(CONF_ENTITY_GRID_PRIORITY, "")
 
