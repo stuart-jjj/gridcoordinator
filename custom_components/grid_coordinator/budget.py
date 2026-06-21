@@ -77,6 +77,12 @@ def compute_voltx_command(
     headroom_reserve tightens the effective import limit so that the specified
     number of watts remains available for transient loads (e.g. oven spike).
 
+    To make the battery follow the EMHASS plan without chasing the grid target (e.g. while
+    the EV charges — its load is served by grid import, not by draining the battery), the
+    caller passes tier2_gain=0 so raw_cmd = mpc_batt_cmd (tier 1 only), paired with an ev
+    headroom_reserve: the battery executes the plan below the ceiling and the cmd_floor
+    forces just enough discharge to hold the import-headroom ceiling above it.
+
     transient_active engages high grid-variance damping for a rapidly cycling
     load (oven/cooktop thermostat).  Two effects, both confined to the transient:
       - The tracking error is driven from grid_smoothed (an EMA of the grid)
@@ -229,27 +235,68 @@ def compute_solax_tier1(
     solax_soc_max: float,
     solax_max_charge: float,
     solax_max_discharge: float,
+    grid_after_voltx: float,
+    import_limit: float,
+    export_limit: float,
+    headroom_reserve: float = 0.0,
+    suppress_charge: bool = False,
+    prev_solax_cmd: float = 0.0,
 ) -> tuple[float, SolaxMode]:
     """Compute Solax command as a direct share of the EMHASS battery setpoint.
 
     Used when Voltx is in normal tracking (not SOC-bounded): Solax executes
     (share × mpc_batt_cmd), while Voltx executes the remaining (1−share) fraction
-    plus the tier-2 grid correction.  SOC limits and inverter physical limits apply;
-    no grid-safety clamp (Voltx's computation already accounts for the full plan).
+    plus the tier-2 grid correction.
+
+    A grid-safety clamp keeps projected grid import within (import_limit −
+    headroom_reserve), mirroring Voltx's cmd_floor.  This is what makes Solax ramp
+    down its charging share — and discharge if required — to protect a reserved block
+    of import headroom (e.g. while the EV charges).  When headroom_reserve is 0 the
+    clamp degenerates to the plain import_limit and only stops Solax charging past the
+    hard ceiling; below the ceiling Solax executes its full share unmodified.
+
+    suppress_charge forbids any charging (clamps the result to ≥ 0) while still allowing
+    the grid clamp to force a discharge.  Set it when Voltx is already holding the import
+    ceiling (LOAD_HEADROOM / EV_CHARGING / IMPORT_CEILING): Voltx is computed first and
+    owns the ceiling, so Solax must yield its charging share rather than charge into the
+    ceiling and make Voltx discharge to offset it (a wasteful battery-to-battery round-trip).
+
+    grid_after_voltx is the projected grid after Voltx's command this tick; prev_solax_cmd
+    is added back so the clamp is computed on the Solax-free baseline (same pattern as
+    compute_solax_command).  SOC and inverter physical limits apply last.
     """
     raw_cmd = mpc_batt_cmd * share
 
-    if raw_cmd > 0 and solax_soc <= solax_soc_min:
-        return 0.0, SolaxMode.SOC_FLOOR
-    if raw_cmd < 0 and solax_soc >= solax_soc_max:
-        return 0.0, SolaxMode.SOC_CEILING
+    # Grid-safety / headroom clamp on the Solax-free baseline, mirroring Voltx:
+    # keep projected grid within [−export_limit, import_limit − headroom_reserve].
+    grid_without_solax = grid_after_voltx + prev_solax_cmd
+    cmd_floor = grid_without_solax - (import_limit - headroom_reserve)
+    cmd_ceil = grid_without_solax + export_limit
+    clamped = max(cmd_floor, min(cmd_ceil, raw_cmd))
 
-    raw_cmd = max(-solax_max_charge, min(solax_max_discharge, raw_cmd))
+    # Voltx owns the ceiling when it is the binding constraint: yield the charging share
+    # (keep any grid-clamp-forced discharge) to avoid round-tripping through Voltx.
+    if suppress_charge and clamped < 0:
+        clamped = 0.0
 
-    if raw_cmd > 0:
-        return float(round(raw_cmd)), SolaxMode.FORCE_DISCHARGE
-    if raw_cmd < 0:
-        return float(round(raw_cmd)), SolaxMode.FORCE_CHARGE
+    # SOC limits: never discharge below the floor or charge above the ceiling.
+    soc_blocked: SolaxMode | None = None
+    if solax_soc <= solax_soc_min and clamped > 0:
+        clamped = 0.0
+        soc_blocked = SolaxMode.SOC_FLOOR
+    elif solax_soc >= solax_soc_max and clamped < 0:
+        clamped = 0.0
+        soc_blocked = SolaxMode.SOC_CEILING
+
+    # Inverter physical limits.
+    clamped = max(-solax_max_charge, min(solax_max_discharge, clamped))
+
+    if clamped > 0:
+        return float(round(clamped)), SolaxMode.FORCE_DISCHARGE
+    if clamped < 0:
+        return float(round(clamped)), SolaxMode.FORCE_CHARGE
+    if soc_blocked is not None:
+        return 0.0, soc_blocked
     return 0.0, SolaxMode.SELF_CONSUMPTION
 
 
@@ -265,6 +312,7 @@ def compute_solax_command(
     solax_max_discharge: float,
     import_limit: float,
     export_limit: float,
+    headroom_reserve: float = 0.0,
     prev_solax_cmd: float = 0.0,
 ) -> tuple[float, SolaxMode]:
     """Compute the Solax priority-2 battery command for one 10 s tick.
@@ -292,10 +340,11 @@ def compute_solax_command(
     # output and converges to half the needed correction.
     grid_without_solax = grid_after_voltx + prev_solax_cmd
 
-    # Hard grid-safety bounds for Solax.
+    # Hard grid-safety bounds for Solax, tightened by headroom_reserve so Solax also
+    # protects the reserved import block (e.g. while the EV charges).
     # Grid equation: P_grid = grid_without_solax − solax_cmd
-    # → cmd must stay in [grid_without_solax − import_limit, grid_without_solax + export_limit]
-    grid_limit_floor = grid_without_solax - import_limit
+    # → cmd must stay in [grid_without_solax − (import_limit − reserve), grid_without_solax + export_limit]
+    grid_limit_floor = grid_without_solax - (import_limit - headroom_reserve)
     grid_limit_ceil = grid_without_solax + export_limit
 
     # Residual error: discharge (+) or charge (−) needed to bring grid to target
@@ -313,6 +362,10 @@ def compute_solax_command(
     # Hard grid-safety clamp
     final_cmd = max(grid_limit_floor, min(grid_limit_ceil, raw_cmd))
 
+    # Re-apply physical limits last: the (headroom-tightened) grid-safety floor can demand
+    # more discharge than the inverter can deliver — the command must stay deliverable.
+    final_cmd = max(-solax_max_charge, min(solax_max_discharge, final_cmd))
+
     if final_cmd > 0:
         mode = SolaxMode.FORCE_DISCHARGE
     elif final_cmd < 0:
@@ -321,6 +374,55 @@ def compute_solax_command(
         mode = SolaxMode.SELF_CONSUMPTION
 
     return float(round(final_cmd)), mode
+
+
+def compute_ev_current_limit(
+    *,
+    projected_grid: float,
+    target_grid: float,
+    ev_power: float,
+    watts_per_amp: float,
+    min_current: float,
+    max_current: float,
+    prev_limit: float,
+    release_ramp_step: float,
+    release_ready: bool,
+) -> tuple[float, bool]:
+    """Emergency EV charge-current limit for one 10 s tick (Amps).
+
+    Layer-3 backstop beneath the two battery layers: acts only when the batteries cannot
+    hold projected grid at target_grid (the import-headroom ceiling, import_limit −
+    ev_headroom).  Reduces the EV charge current by the residual overshoot so household
+    import does not eat into the headroom reserved for *other* uncontrolled loads.  The EV
+    is otherwise owned by an external controller (Amber); this only usurps it in an emergency.
+
+    projected_grid : grid after both batteries this tick (W, + = import)
+    target_grid    : ceiling to hold (W) — import_limit − ev_headroom
+    ev_power       : present EV charge power from the monitored sensor (W)
+    prev_limit     : last current limit written (A); equals max_current when not throttling
+    release_ready  : True once grid has stayed below the ceiling long enough to relax
+
+    Returns (current_limit_amps, throttle_active).  throttle_active is False only once the
+    limit has ramped fully back to max_current (control handed back to the external charger).
+
+    While over the ceiling the limit ratchets *down* only (never raises until recovered),
+    so the loop converges instead of hunting as the EV obeys and grid falls.  On sustained
+    recovery it ramps back up by release_ramp_step per tick.
+    """
+    overshoot = projected_grid - target_grid
+    if overshoot > 0:
+        # Shed the overshoot from the EV; ratchet down only.
+        target = (ev_power - overshoot) / watts_per_amp
+        new_limit = min(prev_limit, target)
+    elif release_ready:
+        # Sustained recovery: ramp the cap back up toward max, handing control back.
+        new_limit = prev_limit + release_ramp_step
+    else:
+        # Recovered but holdoff not yet satisfied — hold the cap (hysteresis band).
+        new_limit = prev_limit
+    new_limit = max(min_current, min(max_current, new_limit))
+    active = overshoot > 0 or new_limit < max_current
+    return new_limit, active
 
 
 def build_coordinator_data(
@@ -336,6 +438,8 @@ def build_coordinator_data(
     mpc_batt_power: float = 0.0,
     solax_command: float = 0.0,
     solax_mode: SolaxMode = SolaxMode.SELF_CONSUMPTION,
+    ev_current_limit: float | None = None,
+    ev_throttle_active: bool = False,
 ) -> CoordinatorData:
     """Construct CoordinatorData with derived headroom fields."""
     return CoordinatorData(
@@ -350,4 +454,6 @@ def build_coordinator_data(
         mpc_batt_power=mpc_batt_power,
         solax_command=solax_command,
         solax_mode=solax_mode,
+        ev_current_limit=ev_current_limit,
+        ev_throttle_active=ev_throttle_active,
     )

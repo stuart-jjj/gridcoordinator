@@ -66,7 +66,7 @@ Grid Coordinator — Roadmap
       Four new CoordinatorMode values: override_self_consume, override_force_charge,
       override_force_export, override_disabled — visible in the mode sensor.
 
-  ✓ EV charge awareness
+  ✓ EV charge awareness   [⚠ REPLACED by "Phase 2 revision — EV import-headroom reserve" below; SOC-floor mechanism removed]
       When the configured EV charger power sensor exceeds a threshold (default 500 W), the
       battery SOC floor is dynamically raised to current SOC + 1 %, making battery discharge
       impossible while the car is charging. The EV load is served entirely by grid import up
@@ -88,6 +88,52 @@ Grid Coordinator — Roadmap
       Mode sensor reports load_headroom when this is the binding constraint.
       Config: entity_monitored_load_1, monitored_load_1_threshold (W),
               monitored_load_1_headroom (W), monitored_load_1_holdoff_minutes.
+
+  ---
+  Phase 2 revision — EV import-headroom reserve  [COMPLETE]
+
+  Supersedes the Phase 2 "EV charge awareness" SOC-floor mechanism above.
+
+  Rationale: raising the Voltx SOC floor to soc + 1 % blocked discharge, but via the tier-2 grid
+  correction it also parked Voltx idle, while Solax kept charging on its tier-1 share with no
+  headroom awareness — so the two batteries behaved inconsistently and Solax could add grid import
+  while the EV was drawing. The EV is controlled externally by Amber Electric, which has no
+  visibility of household grid power or limits, so there is no control over EV draw. The
+  coordinator therefore protects a block of import headroom rather than throttling the car.
+
+  ✓ Behaviour while the EV charger is drawing (> ev_charger_threshold):
+  - Both batteries follow the EMHASS plan (tier 1) — charge or discharge — while projected grid
+    import stays below (import_limit − ev_headroom). The old "block Voltx discharge" rule is gone.
+  - Tier 2 (grid-target correction) is disabled for Voltx while the EV charges (effective
+    tier2_gain = 0). The EV is a large unforecast load; without this, tier 2 would drain the
+    battery to drive grid back to the EMHASS target (feed the EV). With it off, the battery
+    executes the plan and lets grid import absorb the EV up to the headroom ceiling. (Solax has
+    no tier-2 term, so only Voltx needed this.)
+  - ev_headroom (config, default 3000 W) is reserved beneath the import ceiling via the same
+    cmd_floor tightening as the monitored-load reserve. As grid import rises toward
+    (import_limit − ev_headroom) both batteries ramp down charging; at/above it Voltx discharges
+    to hold the line, Solax yields its charging share (suppress_charge — Voltx owns the ceiling,
+    avoiding a battery-to-battery round-trip), and Solax joins the discharge via the residual path
+    when Voltx hits its discharge limit.
+  - The ceiling is evaluated against the actual grid sensor (net of house load), so household
+    consumption is accounted for automatically.
+  - When both the EV reserve and the monitored-load reserve are active, the larger is used.
+
+  ✓ Implementation
+  - budget.compute_voltx_command: unchanged core; EV path is just headroom_reserve + tier2_gain=0.
+  - budget.compute_solax_tier1: added grid-safety/headroom clamp on the Solax-free baseline, a
+    suppress_charge flag (yield charge when Voltx owns the ceiling), and SOC handling.
+  - budget.compute_solax_command: headroom_reserve tightens its import floor + a final physical
+    re-clamp (the tightened floor could otherwise command more discharge than the inverter limit).
+  - coordinator: _ev_adjusted_soc_min replaced by _ev_headroom_reserve; reserves combined via max;
+    LOAD_HEADROOM remapped to EV_CHARGING when the EV reserve is the binding/dominant one.
+  - Mode sensor reports ev_charging when the EV headroom reserve binds.
+  - Config: ev_headroom (W, default 3000) added to step 1 + options flow; ev_charger_threshold retained.
+
+  Note: a discharge EMHASS plan is followed during EV charging (battery sells per plan). And if a
+  charge plan is active while grid is low, the battery may charge from grid up to the headroom
+  ceiling — this is literal plan-following, bounded by the reserve. grid_priority, if explicitly
+  enabled, still overrides with deadbeat grid tracking even during EV charging.
 
   ---
   Phase 3 — Solax priority-2 battery  [COMPLETE]
@@ -203,8 +249,35 @@ Grid Coordinator — Roadmap
 
   New sensor: sensor.grid_coordinator_ev_headroom (W available for EV above current draw).
 
-  ---
-  Phase 6 — Enphase curtailment
+  ✓ Emergency EV current throttle (usurp Amber control)  [COMPLETE]
+      EV charging is owned by Amber Electric, which has no visibility of household grid power
+      or limits. As a layer-3 backstop beneath both battery layers, the coordinator caps the EV
+      charge current (number.ziggy_charge_current via number.set_value) when the batteries cannot
+      hold grid import at the headroom ceiling, then restores it when the grid recovers.
+
+      - Target: the import-headroom ceiling (import_limit − ev_headroom), NOT the hard import
+        limit — so the reserve stays protected against other uncontrolled house loads too.
+      - Engages when projected grid after both batteries exceeds the ceiling (i.e. batteries are
+        SOC- or power-constrained). Sheds the overshoot from the EV: new current =
+        (ev_power − overshoot) / watts_per_amp, ratcheting DOWN only while over (converges, no hunting).
+      - Release: once grid stays EV_RELEASE_MARGIN (500 W) below the ceiling for
+        ev_release_holdoff_minutes, ramps the cap back up by ev_release_ramp_step A/tick to max and
+        hands control back to Amber. Re-assert + release-to-max model (Amber cannot be edited):
+        while engaged the cap is re-written every tick to override Amber; on release the configured
+        max is written once and Amber re-asserts its own setpoint next cycle. Also released
+        immediately when the EV stops, and on the disabled / self-consumption / override paths.
+      - Pure function budget.compute_ev_current_limit (unit-tested). Conversion is single-phase
+        230 W/A by default; min current 5 A (Tesla API minimum).
+      - Config (opt-in, off by default): ev_emergency_throttle, entity_ev_charge_current,
+        ev_watts_per_amp (230), ev_min_charge_current (5), ev_max_charge_current (16 — set to the
+        charger/circuit max), ev_release_ramp_step (1), ev_release_holdoff_minutes (2).
+      - New sensor: sensor.grid_coordinator_ev_current_limit (A; unknown when not throttling).
+
+      Not yet done (the rest of Phase 5): proactive current management from positive headroom
+      (raise/lower current to use spare import), and sensor.grid_coordinator_ev_headroom. The
+      emergency throttle only acts in the over-ceiling direction.
+      Known limitation: the throttle runs only in the active control path — it is released (not
+      enforced) during self-consumption / disabled / manual override.
 
   The coordinator owns input_select.solar_production_level (the Shelly relay steps). The
   existing curtailment automation is disabled. The coordinator computes required curtailment

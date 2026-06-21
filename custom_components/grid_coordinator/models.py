@@ -73,3 +73,5 @@ class CoordinatorData:
     mpc_batt_power: float = 0.0        # W — EMHASS battery setpoint used this tick (positive = discharge)
     solax_command: float = 0.0          # W sent to Solax; positive = discharge, negative = charge
     solax_mode: SolaxMode = SolaxMode.SELF_CONSUMPTION  # Solax operating mode this tick
+    ev_current_limit: float | None = None  # A — emergency EV charge-current cap; None when not throttling
+    ev_throttle_active: bool = False        # True while the coordinator is capping EV charge current
