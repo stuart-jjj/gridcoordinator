@@ -97,6 +97,7 @@ from .const import (
     DEFAULT_SOLAX_CMD_DEADBAND,
     DEFAULT_SOLAX_ZERO_DEADBAND,
     DEFAULT_SOLAX_TIER1_SHARE,
+    DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TIER2_GAIN,
@@ -549,8 +550,19 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # ── compute command (pure function, no HA calls) ───────────────────
         # When Solax is taking a tier-1 share, reduce Voltx's mpc_batt proportionally
         # so their combined output equals the EMHASS-planned mpc_batt_cmd.
+        # Taper the share to zero as Solax SOC approaches its ceiling: when Solax is
+        # full it silently ignores charge commands, so Voltx must absorb the full
+        # mpc_batt_cmd to avoid losing that portion of the EMHASS plan.
         solax_share = self._solax_tier1_share if self._solax_enabled() else 0.0
-        voltx_mpc_batt = effective_mpc_batt * (1.0 - solax_share)
+        if solax_share > 0.0:
+            _s_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
+            _s_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
+            _taper_band = DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND
+            _taper = min(1.0, max(0.0, _s_soc_max - _s_soc) / _taper_band)
+            effective_solax_share = solax_share * _taper
+        else:
+            effective_solax_share = 0.0
+        voltx_mpc_batt = effective_mpc_batt * (1.0 - effective_solax_share)
 
         grid_priority = self._grid_priority_active(hass, effective_target)
 
@@ -650,7 +662,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 solax_suppress = ceiling_binding
                 solax_cmd, solax_mode = compute_solax_tier1(
                     mpc_batt_cmd=effective_mpc_batt,
-                    share=solax_share,
+                    share=effective_solax_share,
                     solax_soc=solax_soc,
                     solax_soc_min=solax_soc_min,
                     solax_soc_max=solax_soc_max,
@@ -690,7 +702,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "floor=%.0fW ceil=%.0fW maxc=%.0fW maxd=%.0fW soc=%.0f%% [%.0f..%.0f] "
             "plan_age=%.1fmin stale=%s ev=%s t2g=%.2f gp=%s headroom=%.0fW "
             "transient=%s gstdev=%.0fW gema=%.0fW | "
-            "solax cmd=%.0fW mode=%s path=%s supp=%s soc=%.0f%% after_voltx=%.0fW prev=%.0fW | "
+            "solax cmd=%.0fW mode=%s path=%s supp=%s soc=%.0f%% share=%.2f(taper=%.2f) after_voltx=%.0fW prev=%.0fW | "
             "ev_throttle=%s limit=%sA proj_grid=%.0fW",
             grid_actual,
             grid_age_s,
@@ -724,6 +736,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_path,
             solax_suppress,
             solax_soc,
+            effective_solax_share,
+            effective_solax_share / solax_share if solax_share > 0.0 else 1.0,
             grid_after_voltx,
             prev_solax_cmd,
             ev_throttle_active,

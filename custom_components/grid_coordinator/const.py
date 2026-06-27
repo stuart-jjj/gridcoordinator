@@ -150,6 +150,7 @@ DEFAULT_SOLAX_AUTOREPEAT_DURATION = 20 # s — 2× the 10 s tick; hardware expir
 DEFAULT_SOLAX_CMD_DEADBAND = 50        # W — suppress command updates smaller than this
 DEFAULT_SOLAX_ZERO_DEADBAND = 0        # W — commands within ±this of zero are suppressed to 0
 DEFAULT_SOLAX_TIER1_SHARE = 0.0        # fraction of mpc_batt_cmd Solax executes in parallel with Voltx
+DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND = 10.0  # % below Solax soc_max where tier-1 share tapers to zero
 
 # Remote-control power mode names (as reported by homeassistant-solax-modbus)
 SOLAX_RC_MODE_ENABLED = "Enabled Power Control"
