@@ -359,13 +359,15 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         Engages when the grid target is within grid_priority_band of zero (band=0
         disables the auto-trigger) OR when the configured grid-priority entity —
-        a manual input_boolean or a price-derived template boolean — is 'on'.
+        a manual input_boolean or a price-derived template boolean — is truthy.
+        Accepts "on", "true", "yes", "1" (case-insensitive) to support both
+        binary_sensor and sensor template entities.
         """
         band = float(self._opt(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND))
         if band > 0 and abs(grid_target) <= band:
             return True
         entity = str(self._opt(CONF_ENTITY_GRID_PRIORITY, "")).strip()
-        return bool(entity) and _str(hass, entity, "off") == "on"
+        return bool(entity) and _str(hass, entity, "off").lower() in ("on", "true", "yes", "1")
 
     # ── override control ──────────────────────────────────────────────────────
 
