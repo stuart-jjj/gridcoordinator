@@ -143,7 +143,7 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 )),
             vol.Required(CONF_TIER2_GAIN, default=defaults.get(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
-                    min=0.1, max=1.0, step=0.1, mode=_NUM,
+                    min=0.0, max=1.0, step=0.1, mode=_NUM,
                 )),
             vol.Required(CONF_GRID_PRIORITY_BAND, default=defaults.get(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
