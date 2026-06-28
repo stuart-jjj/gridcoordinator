@@ -52,6 +52,7 @@ CONF_MON_LOAD_1_HOLDOFF_MINUTES = "monitored_load_1_holdoff_minutes"
 # Entity ID config keys
 CONF_ENTITY_GRID_POWER = "entity_grid_power"
 CONF_ENTITY_MPC_GRID_POWER = "entity_mpc_grid_power"
+CONF_ENTITY_VOLTX_CAPACITY = "entity_voltx_capacity"
 CONF_ENTITY_VOLTX_SOC = "entity_voltx_soc"
 CONF_ENTITY_VOLTX_MAX_CHARGE = "entity_voltx_max_charge"
 CONF_ENTITY_VOLTX_MAX_DISCHARGE = "entity_voltx_max_discharge"
@@ -106,6 +107,7 @@ ENTITY_MPC_GRID_POWER = "sensor.mpc_grid_power"
 ENTITY_MPC_BATT_POWER = "sensor.mpc_batt_power"
 # EMHASS output — positive = discharging (same as voltx_command convention).
 
+ENTITY_VOLTX_CAPACITY = "input_number.voltx_plant_rated_energy_capacity"        # kWh (rated, static)
 ENTITY_VOLTX_SOC = "sensor.battery_state_of_charge"                            # %
 ENTITY_VOLTX_MAX_CHARGE = "input_number.voltx_battery_max_charging_limit"      # W
 ENTITY_VOLTX_MAX_DISCHARGE = "input_number.voltx_battery_max_discharging_limit"  # W
@@ -128,6 +130,7 @@ ENTITY_VOLTX_WORK_MODE = "select.voltx_inverter_work_mode"
 VOLTX_WORK_MODE_CUSTOM = "Custom"
 
 # ── Solax entity ID config keys ───────────────────────────────────────────────
+CONF_ENTITY_SOLAX_CAPACITY = "entity_solax_capacity"
 CONF_ENTITY_SOLAX_SOC = "entity_solax_soc"
 CONF_ENTITY_SOLAX_SOC_MIN = "entity_solax_soc_min"
 CONF_ENTITY_SOLAX_SOC_MAX = "entity_solax_soc_max"
@@ -141,7 +144,9 @@ CONF_SOLAX_MAX_CHARGE = "solax_max_charge"
 CONF_SOLAX_MAX_DISCHARGE = "solax_max_discharge"
 CONF_SOLAX_CMD_DEADBAND = "solax_cmd_deadband"
 CONF_SOLAX_ZERO_DEADBAND = "solax_zero_deadband"
-CONF_SOLAX_TIER1_SHARE = "solax_tier1_share"
+CONF_SOLAX_TIER1_SHARE = "solax_tier1_share"  # removed — replaced by dynamic SOC-balance
+CONF_SOC_BALANCE_SENSITIVITY = "soc_balance_sensitivity"
+CONF_SOC_BALANCE_DEADBAND = "soc_balance_deadband"
 
 # ── Solax defaults ─────────────────────────────────────────────────────────────
 DEFAULT_SOLAX_MAX_CHARGE = 2400        # W — X1 AC G3 hardware limit
@@ -149,7 +154,9 @@ DEFAULT_SOLAX_MAX_DISCHARGE = 2400     # W
 DEFAULT_SOLAX_AUTOREPEAT_DURATION = 20 # s — 2× the 10 s tick; hardware expires in 4 s
 DEFAULT_SOLAX_CMD_DEADBAND = 50        # W — suppress command updates smaller than this
 DEFAULT_SOLAX_ZERO_DEADBAND = 0        # W — commands within ±this of zero are suppressed to 0
-DEFAULT_SOLAX_TIER1_SHARE = 0.0        # fraction of mpc_batt_cmd Solax executes in parallel with Voltx
+DEFAULT_SOLAX_TIER1_SHARE = 0.0        # unused — kept for migration compatibility only
+DEFAULT_SOC_BALANCE_SENSITIVITY = 0.01  # share units per % SOC difference beyond the deadband
+DEFAULT_SOC_BALANCE_DEADBAND = 5.0      # % SOC difference below which no share adjustment is applied
 DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND = 10.0  # % below Solax soc_max where tier-1 share tapers to zero
 
 # Remote-control power mode names (as reported by homeassistant-solax-modbus)
@@ -158,6 +165,7 @@ SOLAX_RC_MODE_DISABLED = "Disabled"
 
 # ── Solax production entity IDs ────────────────────────────────────────────────
 # Hub name "solax" — must match the name configured in the Solax Modbus integration.
+ENTITY_SOLAX_CAPACITY = "input_number.solax_plant_rated_energy_capacity"        # kWh (rated, static)
 ENTITY_SOLAX_SOC = "sensor.solax_battery_capacity"
 ENTITY_SOLAX_SOC_MIN = "number.solax_selfuse_discharge_min_soc"
 ENTITY_SOLAX_SOC_MAX = "number.solax_battery_charge_upper_soc"
@@ -190,6 +198,7 @@ SIM_ENTITY_VOLTX_WORK_MODE = "select.grid_coordinator_sim_work_mode"
 # Maps config key → production default entity ID
 ENTITY_ID_DEFAULTS: dict[str, str] = {
     # Voltx + grid
+    CONF_ENTITY_VOLTX_CAPACITY: ENTITY_VOLTX_CAPACITY,
     CONF_ENTITY_GRID_POWER: ENTITY_GRID_POWER,
     CONF_ENTITY_MPC_GRID_POWER: ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_MPC_BATT_POWER: ENTITY_MPC_BATT_POWER,
@@ -202,6 +211,7 @@ ENTITY_ID_DEFAULTS: dict[str, str] = {
     CONF_ENTITY_VOLTX_CMD: ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_WORK_MODE: ENTITY_VOLTX_WORK_MODE,
     # Solax
+    CONF_ENTITY_SOLAX_CAPACITY: ENTITY_SOLAX_CAPACITY,
     CONF_ENTITY_SOLAX_SOC: ENTITY_SOLAX_SOC,
     CONF_ENTITY_SOLAX_SOC_MIN: ENTITY_SOLAX_SOC_MIN,
     CONF_ENTITY_SOLAX_SOC_MAX: ENTITY_SOLAX_SOC_MAX,

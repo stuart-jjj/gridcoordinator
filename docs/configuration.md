@@ -202,12 +202,21 @@ Physical charge power limit for the Solax inverter. Clamps the computed Solax co
 **`solax_max_discharge`** (default: 2400 W)
 Physical discharge power limit. Same role as `solax_max_charge` on the discharge side.
 
-**`solax_tier1_share`** (default: 0.0)
-Fraction of the EMHASS battery setpoint (`mpc_batt_cmd`) that Solax executes in parallel with Voltx during normal (non-SOC-bounded) tracking. Voltx executes the complementary `(1 − share)` fraction plus the full tier-2 grid-error correction.
+**`soc_balance_sensitivity`** (default: 0.01)
+Controls how aggressively the coordinator adjusts Solax's tier-1 share to equalise state-of-charge between the two batteries. Units are share fraction per percent SOC difference.
 
-At the default of 0.0, Solax is idle during normal tracking and only activates when Voltx is constrained (SOC boundary or physical inverter limit). Setting it to, say, 0.3 means Solax executes 30% of every charge/discharge command alongside Voltx.
+The base share (no adjustment) is `solax_capacity / (voltx_capacity + solax_capacity)` — the fraction at which both batteries' SOC changes at equal rate (`dSOC/dt = power / rated_kWh`). When Solax is ahead of Voltx in SOC, its share is nudged upward during discharging (make the fuller battery work harder) and downward during charging (give the emptier battery more charge work). The correction is symmetric — it always drives the SOC gap toward zero.
 
-When Voltx hits a constraint (SOC floor/ceiling or charge/discharge limit) regardless of this setting, Solax automatically switches to priority-2 mode and covers the residual tracking error instead.
+Example: with a 10% SOC gap and sensitivity 0.01, the share shifts by 0.10 (10 percentage points) beyond the base. Raise sensitivity if SOC alignment is sluggish; lower it if you see oscillation. Set to 0.0 to use the pure capacity ratio with no imbalance correction.
+
+The SOC deadband (below) prevents adjustment for small gaps, and Solax's physical power limits (`solax_max_charge` / `solax_max_discharge`) naturally cap the effective share regardless of the computed value.
+
+**`soc_balance_deadband`** (default: 5 %)
+Minimum SOC difference required before the sensitivity adjustment is applied. Within this band the base capacity-ratio share is used unchanged. Prevents micro-hunting when the batteries are nearly balanced. Requires both capacity entities to be configured (see [Solax entity IDs](#solax-entity-ids)).
+
+When either capacity entity is absent or reads zero, the feature falls back to Solax residual-only (no tier-1 share) — the same behaviour as before this feature was added.
+
+When Voltx hits a constraint (SOC floor/ceiling or physical inverter limit) regardless of the computed share, Solax automatically switches to priority-2 residual mode and covers the tracking error instead.
 
 ---
 
@@ -249,6 +258,7 @@ Configured in step 2 of the setup flow. All have production defaults; only chang
 | `entity_mpc_grid_power` | EMHASS grid target (W) | `sensor.mpc_grid_power` |
 | `entity_mpc_batt_power` | EMHASS battery setpoint (W) | `sensor.mpc_batt_power` |
 | `entity_voltx_soc` | Voltx battery state of charge (%) | `sensor.battery_state_of_charge` |
+| `entity_voltx_capacity` | Voltx rated battery capacity (kWh) — used for SOC-balance share computation | `input_number.voltx_plant_rated_energy_capacity` |
 | `entity_voltx_max_charge` | Voltx max charge limit (W) | `input_number.voltx_battery_max_charging_limit` |
 | `entity_voltx_max_discharge` | Voltx max discharge limit (W) | `input_number.voltx_battery_max_discharging_limit` |
 | `entity_soc_min` | SOC floor below which discharging is suppressed (%) | `number.soc_min` |
@@ -271,6 +281,7 @@ Configured in step 3. Leave `entity_solax_soc` blank to disable Solax entirely �
 | Config key | What it reads/writes | Default |
 |---|---|---|
 | `entity_solax_soc` | Solax battery state of charge (%) | `sensor.solax_battery_capacity` |
+| `entity_solax_capacity` | Solax rated battery capacity (kWh) — used for SOC-balance share computation | `input_number.solax_plant_rated_energy_capacity` |
 | `entity_solax_soc_min` | Solax SOC floor (%, entity or literal) | `number.solax_selfuse_discharge_min_soc` |
 | `entity_solax_soc_max` | Solax SOC ceiling (%, entity or literal) | `number.solax_battery_charge_upper_soc` |
 | `entity_solax_rc_power_control` | Remote-control enable/disable select | `select.solax_remotecontrol_power_control` |

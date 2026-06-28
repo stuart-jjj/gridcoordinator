@@ -18,6 +18,7 @@ from .const import (
     CONF_ENTITY_MON_LOAD_1,
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
+    CONF_ENTITY_SOLAX_CAPACITY,
     CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
     CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
     CONF_ENTITY_SOLAX_RC_POWER_CONTROL,
@@ -25,6 +26,7 @@ from .const import (
     CONF_ENTITY_SOLAX_SOC,
     CONF_ENTITY_SOLAX_SOC_MAX,
     CONF_ENTITY_SOLAX_SOC_MIN,
+    CONF_ENTITY_VOLTX_CAPACITY,
     CONF_ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
@@ -50,9 +52,10 @@ from .const import (
     CONF_RAMP_STEP,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
+    CONF_SOC_BALANCE_DEADBAND,
+    CONF_SOC_BALANCE_SENSITIVITY,
     CONF_SOLAX_CMD_DEADBAND,
     CONF_SOLAX_ZERO_DEADBAND,
-    CONF_SOLAX_TIER1_SHARE,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TEST_MODE,
@@ -82,9 +85,10 @@ from .const import (
     DEFAULT_RAMP_STEP,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
+    DEFAULT_SOC_BALANCE_DEADBAND,
+    DEFAULT_SOC_BALANCE_SENSITIVITY,
     DEFAULT_SOLAX_CMD_DEADBAND,
     DEFAULT_SOLAX_ZERO_DEADBAND,
-    DEFAULT_SOLAX_TIER1_SHARE,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
     DEFAULT_TIER2_GAIN,
@@ -223,9 +227,13 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=500, step=10, unit_of_measurement="W", mode=_NUM,
                 )),
-            vol.Required(CONF_SOLAX_TIER1_SHARE, default=defaults.get(CONF_SOLAX_TIER1_SHARE, DEFAULT_SOLAX_TIER1_SHARE)):
+            vol.Required(CONF_SOC_BALANCE_SENSITIVITY, default=defaults.get(CONF_SOC_BALANCE_SENSITIVITY, DEFAULT_SOC_BALANCE_SENSITIVITY)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
-                    min=0.0, max=0.5, step=0.05, mode=_NUM,
+                    min=0.0, max=0.1, step=0.005, mode=_NUM,
+                )),
+            vol.Required(CONF_SOC_BALANCE_DEADBAND, default=defaults.get(CONF_SOC_BALANCE_DEADBAND, DEFAULT_SOC_BALANCE_DEADBAND)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=20, step=1, unit_of_measurement="%", mode=_NUM,
                 )),
         }
     )
@@ -236,6 +244,7 @@ def _solax_schema(defaults: dict) -> vol.Schema:
     return vol.Schema(
         {
             vol.Optional(CONF_ENTITY_SOLAX_SOC, default=defaults.get(CONF_ENTITY_SOLAX_SOC, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_CAPACITY, default=defaults.get(CONF_ENTITY_SOLAX_CAPACITY, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_CAPACITY])): _TEXT,
             vol.Optional(CONF_ENTITY_SOLAX_SOC_MIN, default=defaults.get(CONF_ENTITY_SOLAX_SOC_MIN, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC_MIN])): _TEXT,
             vol.Optional(CONF_ENTITY_SOLAX_SOC_MAX, default=defaults.get(CONF_ENTITY_SOLAX_SOC_MAX, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC_MAX])): _TEXT,
             vol.Optional(CONF_ENTITY_SOLAX_RC_POWER_CONTROL, default=defaults.get(CONF_ENTITY_SOLAX_RC_POWER_CONTROL, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_RC_POWER_CONTROL])): _TEXT,
@@ -254,6 +263,7 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_ENTITY_MPC_GRID_POWER, default=defaults.get(CONF_ENTITY_MPC_GRID_POWER, ENTITY_ID_DEFAULTS[CONF_ENTITY_MPC_GRID_POWER])): _TEXT,
             vol.Required(CONF_ENTITY_MPC_BATT_POWER, default=defaults.get(CONF_ENTITY_MPC_BATT_POWER, ENTITY_ID_DEFAULTS[CONF_ENTITY_MPC_BATT_POWER])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_SOC, default=defaults.get(CONF_ENTITY_VOLTX_SOC, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_SOC])): _TEXT,
+            vol.Optional(CONF_ENTITY_VOLTX_CAPACITY, default=defaults.get(CONF_ENTITY_VOLTX_CAPACITY, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_CAPACITY])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_MAX_CHARGE, default=defaults.get(CONF_ENTITY_VOLTX_MAX_CHARGE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_MAX_CHARGE])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_MAX_DISCHARGE, default=defaults.get(CONF_ENTITY_VOLTX_MAX_DISCHARGE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_MAX_DISCHARGE])): _TEXT,
             vol.Required(CONF_ENTITY_SOC_MIN, default=defaults.get(CONF_ENTITY_SOC_MIN, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOC_MIN])): _TEXT,
@@ -395,7 +405,8 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_SOLAX_MAX_DISCHARGE: self._current(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE),
             CONF_SOLAX_CMD_DEADBAND: self._current(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND),
             CONF_SOLAX_ZERO_DEADBAND: self._current(CONF_SOLAX_ZERO_DEADBAND, DEFAULT_SOLAX_ZERO_DEADBAND),
-            CONF_SOLAX_TIER1_SHARE: self._current(CONF_SOLAX_TIER1_SHARE, DEFAULT_SOLAX_TIER1_SHARE),
+            CONF_SOC_BALANCE_SENSITIVITY: self._current(CONF_SOC_BALANCE_SENSITIVITY, DEFAULT_SOC_BALANCE_SENSITIVITY),
+            CONF_SOC_BALANCE_DEADBAND: self._current(CONF_SOC_BALANCE_DEADBAND, DEFAULT_SOC_BALANCE_DEADBAND),
         }
         return self.async_show_form(
             step_id="init",
@@ -440,6 +451,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
 
         solax_keys = (
             CONF_ENTITY_SOLAX_SOC,
+            CONF_ENTITY_SOLAX_CAPACITY,
             CONF_ENTITY_SOLAX_SOC_MIN,
             CONF_ENTITY_SOLAX_SOC_MAX,
             CONF_ENTITY_SOLAX_RC_POWER_CONTROL,

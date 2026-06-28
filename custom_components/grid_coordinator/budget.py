@@ -226,6 +226,45 @@ def compute_voltx_command(
     return round(final_cmd), mode, diag
 
 
+def compute_solax_tier1_share(
+    *,
+    voltx_soc: float,
+    solax_soc: float,
+    voltx_capacity_kwh: float,
+    solax_capacity_kwh: float,
+    tier1_cmd: float,
+    sensitivity: float,
+    soc_deadband: float = 5.0,
+) -> float:
+    """Compute the Solax tier-1 share fraction for one tick.
+
+    Base share = solax_capacity / total_capacity — the fraction at which both
+    batteries' SOC changes at equal rate (dSOC/dt = power / capacity).
+
+    When the SOC difference exceeds soc_deadband, a proportional adjustment
+    nudges the share to converge the imbalance:
+
+      delta = sensitivity × (solax_soc − voltx_soc) × sign(tier1_cmd)
+
+    A positive delta increases Solax share when it is fuller and the command
+    is discharging (make the fuller battery work harder), or when it is emptier
+    and the command is charging (give the emptier battery more charge work).
+    The sign reverses with the command direction, so the correction always
+    pushes the SOCs toward each other.
+
+    Returns a float clamped to [0.0, 1.0].
+    """
+    total = voltx_capacity_kwh + solax_capacity_kwh
+    if total <= 0:
+        return 0.0
+    base_share = solax_capacity_kwh / total
+    imbalance = solax_soc - voltx_soc
+    if tier1_cmd == 0 or abs(imbalance) <= soc_deadband:
+        return base_share
+    delta = sensitivity * imbalance * (1.0 if tier1_cmd > 0 else -1.0)
+    return max(0.0, min(1.0, base_share + delta))
+
+
 def compute_solax_tier1(
     *,
     mpc_batt_cmd: float,

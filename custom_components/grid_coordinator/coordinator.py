@@ -16,6 +16,7 @@ from .budget import (
     compute_ev_current_limit,
     compute_solax_command,
     compute_solax_tier1,
+    compute_solax_tier1_share,
     compute_voltx_command,
 )
 from .const import (
@@ -29,6 +30,7 @@ from .const import (
     CONF_ENTITY_MON_LOAD_1,
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
+    CONF_ENTITY_SOLAX_CAPACITY,
     CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
     CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
     CONF_ENTITY_SOLAX_RC_POWER_CONTROL,
@@ -36,6 +38,7 @@ from .const import (
     CONF_ENTITY_SOLAX_SOC,
     CONF_ENTITY_SOLAX_SOC_MAX,
     CONF_ENTITY_SOLAX_SOC_MIN,
+    CONF_ENTITY_VOLTX_CAPACITY,
     CONF_ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
@@ -61,9 +64,10 @@ from .const import (
     CONF_RAMP_STEP,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
+    CONF_SOC_BALANCE_DEADBAND,
+    CONF_SOC_BALANCE_SENSITIVITY,
     CONF_SOLAX_CMD_DEADBAND,
     CONF_SOLAX_ZERO_DEADBAND,
-    CONF_SOLAX_TIER1_SHARE,
     CONF_SOLAX_MAX_CHARGE,
     CONF_SOLAX_MAX_DISCHARGE,
     CONF_TIER2_GAIN,
@@ -93,10 +97,11 @@ from .const import (
     DEFAULT_RAMP_STEP,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
+    DEFAULT_SOC_BALANCE_DEADBAND,
+    DEFAULT_SOC_BALANCE_SENSITIVITY,
     DEFAULT_SOLAX_AUTOREPEAT_DURATION,
     DEFAULT_SOLAX_CMD_DEADBAND,
     DEFAULT_SOLAX_ZERO_DEADBAND,
-    DEFAULT_SOLAX_TIER1_SHARE,
     DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND,
     DEFAULT_SOLAX_MAX_CHARGE,
     DEFAULT_SOLAX_MAX_DISCHARGE,
@@ -286,8 +291,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return float(self._opt(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN))
 
     @property
-    def _solax_tier1_share(self) -> float:
-        return float(self._opt(CONF_SOLAX_TIER1_SHARE, DEFAULT_SOLAX_TIER1_SHARE))
+    def _soc_balance_sensitivity(self) -> float:
+        return float(self._opt(CONF_SOC_BALANCE_SENSITIVITY, DEFAULT_SOC_BALANCE_SENSITIVITY))
+
+    @property
+    def _soc_balance_deadband(self) -> float:
+        return float(self._opt(CONF_SOC_BALANCE_DEADBAND, DEFAULT_SOC_BALANCE_DEADBAND))
 
     @property
     def _transient_variance_threshold(self) -> float:
@@ -547,21 +556,38 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         mon_load_reserve = self._headroom_reserve(hass)
         headroom_reserve = max(ev_reserve, mon_load_reserve)
 
-        # ── compute command (pure function, no HA calls) ───────────────────
-        # When Solax is taking a tier-1 share, reduce Voltx's mpc_batt proportionally
-        # so their combined output equals the EMHASS-planned mpc_batt_cmd.
-        # Taper the share to zero as Solax SOC approaches its ceiling: when Solax is
-        # full it silently ignores charge commands, so Voltx must absorb the full
-        # mpc_batt_cmd to avoid losing that portion of the EMHASS plan.
-        solax_share = self._solax_tier1_share if self._solax_enabled() else 0.0
+        # ── compute Solax tier-1 share (dynamic SOC-balance) ──────────────
+        # Base share = solax_capacity / total_capacity — the fraction that makes both
+        # batteries' SOC change at equal rate (dSOC/dt = power / rated_capacity_kWh).
+        # Sensitivity adjustment nudges the share to converge any existing imbalance.
+        # Requires both capacity entities to be configured; falls back to 0 (Solax
+        # residual-only) if either is absent or zero.
+        # Taper the share to zero as Solax SOC approaches its ceiling so Voltx absorbs
+        # the full EMHASS charge command when Solax is full.
+        solax_soc = float("nan")
+        solax_share = 0.0
+        if self._solax_enabled():
+            solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
+            voltx_cap = _float(hass, self._eid(CONF_ENTITY_VOLTX_CAPACITY), 0.0)
+            solax_cap = _float(hass, self._eid(CONF_ENTITY_SOLAX_CAPACITY), 0.0)
+            if voltx_cap > 0 and solax_cap > 0:
+                solax_share = compute_solax_tier1_share(
+                    voltx_soc=soc,
+                    solax_soc=solax_soc,
+                    voltx_capacity_kwh=voltx_cap,
+                    solax_capacity_kwh=solax_cap,
+                    tier1_cmd=effective_mpc_batt,
+                    sensitivity=self._soc_balance_sensitivity,
+                    soc_deadband=self._soc_balance_deadband,
+                )
         if solax_share > 0.0:
-            _s_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
             _s_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
-            _taper_band = DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND
-            _taper = min(1.0, max(0.0, _s_soc_max - _s_soc) / _taper_band)
+            _taper = min(1.0, max(0.0, _s_soc_max - solax_soc) / DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND)
             effective_solax_share = solax_share * _taper
         else:
             effective_solax_share = 0.0
+
+        # ── compute command (pure function, no HA calls) ───────────────────
         voltx_mpc_batt = effective_mpc_batt * (1.0 - effective_solax_share)
 
         grid_priority = self._grid_priority_active(hass, effective_target)
@@ -616,11 +642,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # ── Solax priority-2 command ───────────────────────────────────────
         prev_solax_cmd = self._solax_last_written_cmd  # capture for logging
-        solax_soc = float("nan")
         solax_path = "off"      # which Solax branch ran this tick (diagnostic)
         solax_suppress = False  # tier-1 charge yielded because Voltx owns the ceiling
         if self._solax_enabled():
-            solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
             solax_soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
             solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))

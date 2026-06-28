@@ -237,6 +237,52 @@ Grid Coordinator — Roadmap
       New sim entity: number.grid_coordinator_sim_mpc_batt_power.
 
   ---
+  Dynamic SOC-balance tier-1 share  [COMPLETE]
+
+  Replaces the static `solax_tier1_share` configuration value with a computed value that
+  automatically adjusts Solax's share of the EMHASS battery setpoint to equalise state-of-charge
+  between the two batteries over time.
+
+  ✓ Physics basis
+      The base share is derived from the rated kWh capacities of each battery:
+
+        base_share = solax_capacity_kWh / (voltx_capacity_kWh + solax_capacity_kWh)
+
+      This is the fraction at which both batteries' SOC changes at equal rate
+      (dSOC/dt = power / rated_capacity), so under a constant command and with the batteries
+      at the same SOC, neither pulls ahead or falls behind.
+
+  ✓ Imbalance correction
+      When the SOC difference exceeds a configurable deadband (default 5 %), a proportional
+      correction nudges the share toward the battery that needs to catch up:
+
+        delta = sensitivity × (solax_soc − voltx_soc) × sign(tier1_cmd)
+
+      When Solax is fuller: during discharge its share increases (make the fuller battery work
+      harder); during charging its share decreases (give the emptier battery more charge work).
+      The sign of the correction is always such that the gap closes — no sign logic needed at
+      the call site.  Result is clamped to [0.0, 1.0].
+
+  ✓ Fallback
+      If either capacity entity is absent or reads zero, solax_share collapses to 0.0 and
+      Solax runs residual-only — identical to the previous default behaviour.  The SOC ceiling
+      taper (existing feature) still applies on top of the computed share.
+
+  ✓ Configuration changes
+      Removed: solax_tier1_share (static fraction, replaced entirely)
+      Added:   soc_balance_sensitivity (share/%, default 0.01)
+               soc_balance_deadband (%, default 5.0)
+               entity_voltx_capacity (step 2 — rated kWh of Voltx battery)
+               entity_solax_capacity (step 3 — rated kWh of Solax battery)
+
+  ✓ Implementation
+      budget.compute_solax_tier1_share(voltx_soc, solax_soc, voltx_capacity_kwh,
+                                        solax_capacity_kwh, tier1_cmd, sensitivity,
+                                        soc_deadband) → float in [0.0, 1.0]
+      coordinator: reads capacity entities once per tick before the Voltx command, also reads
+      solax_soc once here (reused later for Solax command block, no duplicate read).
+
+  ---
   Phase 5 — EV charge current management
 
   Battery protection when the EV is charging is already implemented (Phase 2 — EV charge
@@ -330,12 +376,15 @@ Grid Coordinator — Roadmap
   - Monitored load 1 holdoff after power drops (min) — default 5
   - Solax max charge power (W) — default 2400
   - Solax max discharge power (W) — default 2400
+  - SOC balance sensitivity (share/%, default 0.01) — how aggressively to correct SOC imbalance
+  - SOC balance deadband (%, default 5) — minimum SOC gap before correction applies
 
   Step 2 — Entity IDs:
   - entity_grid_power       — actual grid power (positive = import)
   - entity_mpc_grid_power   — EMHASS MPC grid power setpoint
   - entity_mpc_batt_power   — EMHASS MPC battery power setpoint (primary control signal)
   - entity_voltx_soc        — Voltx battery SOC (%)
+  - entity_voltx_capacity (optional) — Voltx rated battery capacity (kWh); required for SOC-balance
   - entity_voltx_max_charge / entity_voltx_max_discharge — inverter power limits
   - entity_soc_min / entity_soc_max — SOC floor/ceiling (%)
   - entity_enabled          — enable/disable gate
@@ -346,6 +395,7 @@ Grid Coordinator — Roadmap
 
   Step 3 — Solax entity IDs (leave entity_solax_soc blank to disable Solax):
   - entity_solax_soc        — Solax battery SOC (%)
+  - entity_solax_capacity (optional) — Solax rated battery capacity (kWh); required for SOC-balance
   - entity_solax_soc_min / entity_solax_soc_max — Solax SOC floor/ceiling entities
   - entity_solax_rc_power_control — select entity: "Disabled" / "Enabled Power Control"
   - entity_solax_rc_active_power — signed power setpoint (W, Solax: negative = discharge)
@@ -388,6 +438,10 @@ Grid Coordinator — Roadmap
                                          max_charge, max_discharge,
                                          ramp_step, plan_is_stale,
                                          tracking_deadband, headroom_reserve) → (cmd, mode)
+
+                  compute_solax_tier1_share(voltx_soc, solax_soc,
+                                            voltx_capacity_kwh, solax_capacity_kwh,
+                                            tier1_cmd, sensitivity, soc_deadband) → float
 
                   compute_solax_command(voltx_mode, grid_after_voltx, grid_target,
                                          solax_soc, solax_soc_min, solax_soc_max,
