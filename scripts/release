@@ -1,20 +1,46 @@
 #!/usr/bin/env bash
-# Usage: scripts/release <version> <title>
+# Usage: scripts/release <version> <title> [--notes-file <path>]
 # Example: scripts/release 2026.06.25 "Dynamic SOC-balance tier-1 share"
+#          scripts/release 2026.06.25 "Dynamic SOC-balance tier-1 share" --notes-file /tmp/notes.md
 #
 # 1. Updates manifest.json to <version>
 # 2. Commits and pushes to main
-# 3. Opens $EDITOR for you to write release notes
+# 3. Opens $EDITOR for release notes (skipped when --notes-file is given)
 # 4. Runs gh release create with those notes
 
 set -euo pipefail
 
 VERSION="${1:-}"
 TITLE="${2:-}"
+NOTES_FILE_ARG=""
+
+# Parse optional --notes-file flag
+shift 2 2>/dev/null || true
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --notes-file)
+            NOTES_FILE_ARG="${2:-}"
+            if [[ -z "$NOTES_FILE_ARG" ]]; then
+                echo "Error: --notes-file requires a path argument"
+                exit 1
+            fi
+            if [[ ! -f "$NOTES_FILE_ARG" ]]; then
+                echo "Error: notes file not found: $NOTES_FILE_ARG"
+                exit 1
+            fi
+            shift 2
+            ;;
+        *)
+            echo "Unknown argument: $1"
+            exit 1
+            ;;
+    esac
+done
 
 if [[ -z "$VERSION" || -z "$TITLE" ]]; then
-    echo "Usage: scripts/release <version> <title>"
+    echo "Usage: scripts/release <version> <title> [--notes-file <path>]"
     echo "  e.g. scripts/release 2026.06.25 \"Dynamic SOC-balance tier-1 share\""
+    echo "       scripts/release 2026.06.25 \"Dynamic SOC-balance tier-1 share\" --notes-file /tmp/notes.md"
     exit 1
 fi
 
@@ -46,9 +72,15 @@ git add "$MANIFEST"
 git commit -m "chore: bump manifest version to $VERSION"
 git push
 
-# Write release notes in $EDITOR
-NOTES_FILE="$(mktemp /tmp/release-notes-XXXXXX.md)"
-cat > "$NOTES_FILE" <<EOF
+# Determine notes source
+if [[ -n "$NOTES_FILE_ARG" ]]; then
+    NOTES_FILE="$NOTES_FILE_ARG"
+    CLEANUP_NOTES=false
+else
+    # Write template and open $EDITOR
+    NOTES_FILE="$(mktemp /tmp/release-notes-XXXXXX.md)"
+    CLEANUP_NOTES=true
+    cat > "$NOTES_FILE" <<EOF
 ## What's new
 
 <!-- describe the changes here -->
@@ -60,19 +92,20 @@ cat > "$NOTES_FILE" <<EOF
 A Home Assistant custom integration that runs a 10-second closed-loop controller managing Voltx (primary) and Solax (secondary) battery inverters so household grid import/export tracks EMHASS MPC setpoints. Features: two-tier EMHASS-anchored control, EV import-headroom reserve, transient load damping, monitored load headroom, dynamic SOC balancing between batteries, and manual override service calls.
 EOF
 
-EDITOR="${EDITOR:-nano}"
-echo ""
-echo "Opening $EDITOR for release notes — save and close to publish."
-"$EDITOR" "$NOTES_FILE"
+    EDITOR="${EDITOR:-nano}"
+    echo ""
+    echo "Opening $EDITOR for release notes — save and close to publish."
+    "$EDITOR" "$NOTES_FILE"
 
-# Strip comment lines before publishing
-grep -v '^\s*<!--' "$NOTES_FILE" > "${NOTES_FILE}.clean" && mv "${NOTES_FILE}.clean" "$NOTES_FILE"
+    # Strip comment lines before publishing
+    grep -v '^\s*<!--' "$NOTES_FILE" > "${NOTES_FILE}.clean" && mv "${NOTES_FILE}.clean" "$NOTES_FILE"
+fi
 
 gh release create "$VERSION" \
     --target main \
     --title "$VERSION $TITLE" \
     --notes-file "$NOTES_FILE"
 
-rm -f "$NOTES_FILE"
+[[ "$CLEANUP_NOTES" == true ]] && rm -f "$NOTES_FILE"
 echo ""
 echo "Released: https://github.com/stuart-jjj/gridcoordinator/releases/tag/$VERSION"
