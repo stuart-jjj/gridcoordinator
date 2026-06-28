@@ -1,0 +1,78 @@
+#!/usr/bin/env bash
+# Usage: scripts/release <version> <title>
+# Example: scripts/release 2026.06.25 "Dynamic SOC-balance tier-1 share"
+#
+# 1. Updates manifest.json to <version>
+# 2. Commits and pushes to main
+# 3. Opens $EDITOR for you to write release notes
+# 4. Runs gh release create with those notes
+
+set -euo pipefail
+
+VERSION="${1:-}"
+TITLE="${2:-}"
+
+if [[ -z "$VERSION" || -z "$TITLE" ]]; then
+    echo "Usage: scripts/release <version> <title>"
+    echo "  e.g. scripts/release 2026.06.25 \"Dynamic SOC-balance tier-1 share\""
+    exit 1
+fi
+
+MANIFEST="custom_components/grid_coordinator/manifest.json"
+
+if ! [[ "$VERSION" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]+$ ]]; then
+    echo "Error: version must match YYYY.MM.N (e.g. 2026.06.25)"
+    exit 1
+fi
+
+if ! git diff --quiet HEAD; then
+    echo "Error: uncommitted changes present — commit or stash them first"
+    exit 1
+fi
+
+# Update manifest.json
+echo "Updating $MANIFEST → $VERSION"
+python3 -c "
+import json
+with open('$MANIFEST') as f:
+    m = json.load(f)
+m['version'] = '$VERSION'
+with open('$MANIFEST', 'w') as f:
+    json.dump(m, f, indent=2)
+    f.write('\n')
+"
+
+git add "$MANIFEST"
+git commit -m "chore: bump manifest version to $VERSION"
+git push
+
+# Write release notes in $EDITOR
+NOTES_FILE="$(mktemp /tmp/release-notes-XXXXXX.md)"
+cat > "$NOTES_FILE" <<EOF
+## What's new
+
+<!-- describe the changes here -->
+
+---
+
+## What it does
+
+A Home Assistant custom integration that runs a 10-second closed-loop controller managing Voltx (primary) and Solax (secondary) battery inverters so household grid import/export tracks EMHASS MPC setpoints. Features: two-tier EMHASS-anchored control, EV import-headroom reserve, transient load damping, monitored load headroom, dynamic SOC balancing between batteries, and manual override service calls.
+EOF
+
+EDITOR="${EDITOR:-nano}"
+echo ""
+echo "Opening $EDITOR for release notes — save and close to publish."
+"$EDITOR" "$NOTES_FILE"
+
+# Strip comment lines before publishing
+grep -v '^\s*<!--' "$NOTES_FILE" > "${NOTES_FILE}.clean" && mv "${NOTES_FILE}.clean" "$NOTES_FILE"
+
+gh release create "$VERSION" \
+    --target main \
+    --title "$VERSION $TITLE" \
+    --notes-file "$NOTES_FILE"
+
+rm -f "$NOTES_FILE"
+echo ""
+echo "Released: https://github.com/stuart-jjj/gridcoordinator/releases/tag/$VERSION"
