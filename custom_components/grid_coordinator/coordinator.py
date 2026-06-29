@@ -31,6 +31,7 @@ from .const import (
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
     CONF_ENTITY_SOLAX_CAPACITY,
+    CONF_ENTITY_SOLAX_EXPORT_DURATION,
     CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
     CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
     CONF_ENTITY_SOLAX_RC_POWER_CONTROL,
@@ -118,6 +119,7 @@ from .const import (
     ENTITY_MON_LOAD_1,
     EV_RELEASE_MARGIN,
     LOGGER,
+    SOLAX_EXPORT_DURATION_SAFE,
     SOLAX_RC_MODE_DISABLED,
     SOLAX_RC_MODE_ENABLED,
     UPDATE_INTERVAL_SECONDS,
@@ -901,53 +903,77 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         """
         want_active = command != 0.0
         deadband = float(self._opt(CONF_SOLAX_CMD_DEADBAND, DEFAULT_SOLAX_CMD_DEADBAND))
-        try:
-            if want_active:
-                entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
-                rc_enabled = _str(self.hass, entity_rc) == SOLAX_RC_MODE_ENABLED
-                setpoint_changed = (
-                    not self._solax_active
-                    or not rc_enabled
-                    or abs(command - self._solax_last_written_cmd) >= deadband
-                )
-                if setpoint_changed and not rc_enabled:
+        if not want_active:
+            if self._solax_active:
+                await self._async_enter_solax_self_consumption()
+            return
+
+        # want_active — update setpoint if needed, then always press trigger.
+        # Setpoint writes are isolated so a Modbus failure there does not prevent
+        # the trigger press: missing the trigger expires the autorepeat and causes
+        # the inverter to drop RC mode.
+        entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
+        rc_enabled = _str(self.hass, entity_rc) == SOLAX_RC_MODE_ENABLED
+        setpoint_changed = (
+            not self._solax_active
+            or not rc_enabled
+            or abs(command - self._solax_last_written_cmd) >= deadband
+        )
+        if setpoint_changed:
+            try:
+                if not rc_enabled:
                     async with asyncio.timeout(5):
                         await self.hass.services.async_call(
                             "select", "select_option",
                             {"entity_id": entity_rc, "option": SOLAX_RC_MODE_ENABLED},
                             blocking=True,
                         )
-                if setpoint_changed:
-                    # Set active power (negate: Solax negative = discharge)
+                # Extend hardware command-expiry timer (register 0x9F, default 4 s) so the
+                # inverter tolerates the 10-second tick gap without dropping RC mode.
+                if not self._solax_active:
+                    eid_exp = self._eid(CONF_ENTITY_SOLAX_EXPORT_DURATION)
                     async with asyncio.timeout(5):
                         await self.hass.services.async_call(
-                            "number", "set_value",
-                            {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER),
-                             "value": str(int(-command))},
+                            "select", "select_option",
+                            {"entity_id": eid_exp, "option": SOLAX_EXPORT_DURATION_SAFE},
                             blocking=True,
                         )
-                    # Set autorepeat duration so command survives between coordinator ticks
-                    async with asyncio.timeout(5):
-                        await self.hass.services.async_call(
-                            "number", "set_value",
-                            {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION),
-                             "value": str(DEFAULT_SOLAX_AUTOREPEAT_DURATION)},
-                            blocking=True,
-                        )
-                    self._solax_last_written_cmd = command
-                    LOGGER.debug("solax: command=%.0fW (rc_active_power=%.0f)", command, -command)
-                # Always press trigger to keep the autorepeat alive, even within deadband
+                    LOGGER.debug("solax: export_duration set to %s", SOLAX_EXPORT_DURATION_SAFE)
+                # Set active power (negate: Solax negative = discharge)
                 async with asyncio.timeout(5):
                     await self.hass.services.async_call(
-                        "button", "press",
-                        {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_TRIGGER)},
+                        "number", "set_value",
+                        {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_ACTIVE_POWER),
+                         "value": str(int(-command))},
                         blocking=True,
                     )
-                self._solax_active = True
-            elif self._solax_active:
-                await self._async_enter_solax_self_consumption()
+                # Set autorepeat duration so command survives between coordinator ticks
+                async with asyncio.timeout(5):
+                    await self.hass.services.async_call(
+                        "number", "set_value",
+                        {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION),
+                         "value": str(DEFAULT_SOLAX_AUTOREPEAT_DURATION)},
+                        blocking=True,
+                    )
+                self._solax_last_written_cmd = command
+                LOGGER.debug("solax: command=%.0fW (rc_active_power=%.0f)", command, -command)
+            except Exception as err:  # noqa: BLE001
+                LOGGER.warning("Solax setpoint write failed: %s", err)
+                self._solax_last_written_cmd = 0.0
+                # Fall through — still press trigger below to keep inverter alive
+
+        # Always press trigger to keep the autorepeat alive, even within deadband.
+        # Isolated try so setpoint-write failures above do not block this.
+        try:
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "button", "press",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_TRIGGER)},
+                    blocking=True,
+                )
+            self._solax_active = True
         except Exception as err:  # noqa: BLE001
-            LOGGER.warning("Solax write failed: %s", err)
+            LOGGER.warning("Solax trigger failed: %s", err)
             self._solax_active = False
             self._solax_last_written_cmd = 0.0
 

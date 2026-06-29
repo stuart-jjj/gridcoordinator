@@ -138,6 +138,7 @@ CONF_ENTITY_SOLAX_RC_POWER_CONTROL = "entity_solax_rc_power_control"
 CONF_ENTITY_SOLAX_RC_ACTIVE_POWER = "entity_solax_rc_active_power"
 CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION = "entity_solax_rc_autorepeat_duration"
 CONF_ENTITY_SOLAX_RC_TRIGGER = "entity_solax_rc_trigger"
+CONF_ENTITY_SOLAX_EXPORT_DURATION = "entity_solax_export_duration"
 
 # ── Solax parameter config keys ────────────────────────────────────────────────
 CONF_SOLAX_MAX_CHARGE = "solax_max_charge"
@@ -151,7 +152,8 @@ CONF_SOC_BALANCE_DEADBAND = "soc_balance_deadband"
 # ── Solax defaults ─────────────────────────────────────────────────────────────
 DEFAULT_SOLAX_MAX_CHARGE = 2400        # W — X1 AC G3 hardware limit
 DEFAULT_SOLAX_MAX_DISCHARGE = 2400     # W
-DEFAULT_SOLAX_AUTOREPEAT_DURATION = 20 # s — 2× the 10 s tick; hardware expires in 4 s
+DEFAULT_SOLAX_AUTOREPEAT_DURATION = 90  # s — HA software autorepeat window; hardware expiry controlled by export_duration (0x9F)
+SOLAX_EXPORT_DURATION_SAFE = "15 Minutes"  # written to select.solax_export_duration (register 0x9F) on first activation
 DEFAULT_SOLAX_CMD_DEADBAND = 50        # W — suppress command updates smaller than this
 DEFAULT_SOLAX_ZERO_DEADBAND = 0        # W — commands within ±this of zero are suppressed to 0
 DEFAULT_SOLAX_TIER1_SHARE = 0.0        # unused — kept for migration compatibility only
@@ -173,6 +175,7 @@ ENTITY_SOLAX_RC_POWER_CONTROL = "select.solax_remotecontrol_power_control"
 ENTITY_SOLAX_RC_ACTIVE_POWER = "number.solax_remotecontrol_active_power"
 ENTITY_SOLAX_RC_AUTOREPEAT_DURATION = "number.solax_remotecontrol_autorepeat_duration"
 ENTITY_SOLAX_RC_TRIGGER = "button.solax_remotecontrol_trigger_gen3"
+ENTITY_SOLAX_EXPORT_DURATION = "select.solax_export_duration"  # register 0x9F — hardware RC command expiry timer
 
 # ── Simulated entity IDs (created in testing mode) ────────────────────────────
 SIM_ENTITY_SOLAX_SOC = "number.grid_coordinator_sim_solax_soc"
@@ -219,6 +222,7 @@ ENTITY_ID_DEFAULTS: dict[str, str] = {
     CONF_ENTITY_SOLAX_RC_ACTIVE_POWER: ENTITY_SOLAX_RC_ACTIVE_POWER,
     CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION: ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
     CONF_ENTITY_SOLAX_RC_TRIGGER: ENTITY_SOLAX_RC_TRIGGER,
+    CONF_ENTITY_SOLAX_EXPORT_DURATION: ENTITY_SOLAX_EXPORT_DURATION,
 }
 
 # Maps config key → simulated entity ID
