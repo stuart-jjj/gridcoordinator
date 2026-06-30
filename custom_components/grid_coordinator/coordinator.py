@@ -947,14 +947,6 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                          "value": str(int(-command))},
                         blocking=True,
                     )
-                # Set autorepeat duration so command survives between coordinator ticks
-                async with asyncio.timeout(5):
-                    await self.hass.services.async_call(
-                        "number", "set_value",
-                        {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION),
-                         "value": str(DEFAULT_SOLAX_AUTOREPEAT_DURATION)},
-                        blocking=True,
-                    )
                 self._solax_last_written_cmd = command
                 LOGGER.debug("solax: command=%.0fW (rc_active_power=%.0f)", command, -command)
             except Exception as err:  # noqa: BLE001
@@ -962,8 +954,23 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._solax_last_written_cmd = 0.0
                 # Fall through — still press trigger below to keep inverter alive
 
-        # Always press trigger to keep the autorepeat alive, even within deadband.
-        # Isolated try so setpoint-write failures above do not block this.
+        # Always refresh autorepeat duration and press trigger every tick.
+        # Writing autorepeat_duration every tick (not just on setpoint changes) ensures
+        # the hardware timer never expires due to Modbus bus contention between the
+        # coordinator writes and the Solax integration poll (LCM of 10s tick and 15s
+        # poll = collision every 30 s).  Isolated try so a failure here does not block
+        # the trigger press below.
+        try:
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "number", "set_value",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION),
+                     "value": str(DEFAULT_SOLAX_AUTOREPEAT_DURATION)},
+                    blocking=True,
+                )
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("Solax autorepeat refresh failed: %s", err)
+
         try:
             async with asyncio.timeout(5):
                 await self.hass.services.async_call(

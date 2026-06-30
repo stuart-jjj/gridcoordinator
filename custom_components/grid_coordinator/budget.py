@@ -127,19 +127,19 @@ def compute_voltx_command(
 
     # Tracking deadband — hold the current command when the grid error is small.
     # Prevents command chatter from measurement noise and small load fluctuations.
-    # The held command is still clamped to the hard grid-safety limits below, since
-    # under transient damping the deadband is tested on the smoothed grid.
+    # Always tested against raw grid_actual (not the smoothed grid_track) so that a
+    # real load step immediately releases the hold even when transient damping is
+    # engaged.  The EMA is still used only for the tier-2 correction term above,
+    # where it prevents chasing fast thermostatic cycling.
     # Skip when headroom is active (oven may have just fired) or when mpc_batt_cmd
     # has moved significantly from prev_cmd — a new EMHASS plan must be acted on
     # even when the grid happens to be near target (e.g. solar-powered charging).
-    if (abs(grid_track - grid_target) <= tracking_deadband
+    if (abs(grid_actual - grid_target) <= tracking_deadband
             and abs(mpc_batt_cmd - prev_cmd) <= tracking_deadband
             and headroom_reserve == 0):
         # Hold the current command, but still enforce the hard grid-safety limits
-        # against the *raw* grid (cmd_floor/cmd_ceil derive from raw uncontrolled).
-        # With transient damping the deadband is tested on grid_track (smoothed), so
-        # a raw grid spike can sit outside the limits while the smoothed value is
-        # within deadband — clamp here so the safety guarantee always holds.
+        # (cmd_floor/cmd_ceil derive from raw uncontrolled, so the safety guarantee
+        # holds regardless of whether transient smoothing is active).
         held_cmd = max(cmd_floor, min(cmd_ceil, prev_cmd))
         # Report the binding constraint even in deadband so Solax knows Voltx is bounded.
         # Without this, Solax successfully brings grid near target → deadband fires →
