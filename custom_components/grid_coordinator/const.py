@@ -175,7 +175,7 @@ ENTITY_SOLAX_RC_POWER_CONTROL = "select.solax_remotecontrol_power_control"
 ENTITY_SOLAX_RC_ACTIVE_POWER = "number.solax_remotecontrol_active_power"
 ENTITY_SOLAX_RC_AUTOREPEAT_DURATION = "number.solax_remotecontrol_autorepeat_duration"
 ENTITY_SOLAX_RC_TRIGGER = "button.solax_remotecontrol_trigger_gen3"
-ENTITY_SOLAX_EXPORT_DURATION = "select.solax_export_duration"  # register 0x9F — hardware RC command expiry timer
+ENTITY_SOLAX_EXPORT_DURATION = "select.solax_modbus_export_duration"  # register 0x9F — hardware RC command expiry timer
 
 # ── Simulated entity IDs (created in testing mode) ────────────────────────────
 SIM_ENTITY_SOLAX_SOC = "number.grid_coordinator_sim_solax_soc"
