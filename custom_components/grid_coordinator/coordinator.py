@@ -944,23 +944,21 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 # Fall through — still press trigger below to keep inverter alive
 
         # Extend hardware command-expiry timer (register 0x9F, default 4 s) so the inverter
-        # tolerates the 10-second tick gap without dropping RC mode. Verified via readback
-        # every tick and kept fully independent of setpoint_changed above: it self-heals a
-        # drifted or never-applied register on its own without forcing a redundant
-        # active-power rewrite (that coupling caused an active_power write every tick while
-        # the entity id was wrong/unavailable).
-        eid_exp = self._eid(CONF_ENTITY_SOLAX_EXPORT_DURATION)
-        if _str(self.hass, eid_exp) != SOLAX_EXPORT_DURATION_SAFE:
-            try:
-                async with asyncio.timeout(5):
-                    await self.hass.services.async_call(
-                        "select", "select_option",
-                        {"entity_id": eid_exp, "option": SOLAX_EXPORT_DURATION_SAFE},
-                        blocking=True,
-                    )
-                LOGGER.debug("solax: export_duration set to %s", SOLAX_EXPORT_DURATION_SAFE)
-            except Exception as err:  # noqa: BLE001
-                LOGGER.warning("Solax export_duration write failed: %s", err)
+        # tolerates the 10-second tick gap without dropping RC mode. Written unconditionally
+        # every tick, like autorepeat_duration below, rather than gated on a readback: 0x9F is
+        # never included in any of solax-modbus's polled register blocks (only the unrelated
+        # mirror at 0x10B is), so the select entity's reported state is just an echo of our
+        # last write and can never reveal a genuine hardware-side reset of this register.
+        try:
+            async with asyncio.timeout(5):
+                await self.hass.services.async_call(
+                    "select", "select_option",
+                    {"entity_id": self._eid(CONF_ENTITY_SOLAX_EXPORT_DURATION),
+                     "option": SOLAX_EXPORT_DURATION_SAFE},
+                    blocking=True,
+                )
+        except Exception as err:  # noqa: BLE001
+            LOGGER.warning("Solax export_duration refresh failed: %s", err)
 
         # Always refresh autorepeat duration and press trigger every tick.
         # Writing autorepeat_duration every tick (not just on setpoint changes) ensures
