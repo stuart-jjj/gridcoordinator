@@ -916,10 +916,18 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 await self._async_enter_solax_self_consumption()
             return
 
-        # want_active — update setpoint if needed, then always press trigger.
+        # want_active — update setpoint if needed, then press trigger.
         # Setpoint writes are isolated so a Modbus failure there does not prevent
-        # the trigger press: missing the trigger expires the autorepeat and causes
-        # the inverter to drop RC mode.
+        # the trigger press for entities that don't depend on the failed write.
+        # If the active-power write itself fails, the trigger press is skipped this
+        # tick: pressing it anyway would re-send solax-modbus's own cached
+        # remotecontrol_active_power value, which may still hold a stale/wrong power
+        # (e.g. 0 W left over from a prior idle period) — this happened for real
+        # (2026-07-03 14:50:07): a Modbus write hung 5s then failed with "Request
+        # cancelled outside pymodbus", and the unconditional trigger press that
+        # followed sent the inverter an active RC command for 0 W instead of the
+        # intended setpoint. Better to miss one tick's refresh than to actively
+        # command the wrong power.
         entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
         rc_enabled = _str(self.hass, entity_rc) == SOLAX_RC_MODE_ENABLED
         setpoint_changed = (
@@ -927,6 +935,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             or not rc_enabled
             or abs(command - self._solax_last_written_cmd) >= deadband
         )
+        setpoint_write_ok = True
         if setpoint_changed:
             try:
                 if not rc_enabled:
@@ -959,10 +968,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             except Exception as err:  # noqa: BLE001
                 LOGGER.warning("Solax setpoint write failed: %s", err)
                 self._solax_last_written_cmd = 0.0
-                # Fall through — still press trigger below to keep inverter alive
+                setpoint_write_ok = False
 
-        # Always refresh autorepeat duration and press trigger every tick to keep RC mode
-        # alive between setpoint changes.
+        # Always refresh autorepeat duration every tick to keep RC mode alive between
+        # setpoint changes — harmless and independent of whether the setpoint write
+        # above succeeded.
         try:
             async with asyncio.timeout(5):
                 await self.hass.services.async_call(
@@ -973,6 +983,13 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 )
         except Exception as err:  # noqa: BLE001
             LOGGER.warning("Solax autorepeat refresh failed: %s", err)
+
+        if not setpoint_write_ok:
+            LOGGER.warning(
+                "Solax trigger press skipped this tick: setpoint write failed, "
+                "cached active_power may be stale"
+            )
+            return
 
         try:
             async with asyncio.timeout(5):
