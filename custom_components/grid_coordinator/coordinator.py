@@ -914,9 +914,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # the inverter to drop RC mode.
         entity_rc = self._eid(CONF_ENTITY_SOLAX_RC_POWER_CONTROL)
         rc_enabled = _str(self.hass, entity_rc) == SOLAX_RC_MODE_ENABLED
+        eid_exp = self._eid(CONF_ENTITY_SOLAX_EXPORT_DURATION)
+        export_duration_ok = _str(self.hass, eid_exp) == SOLAX_EXPORT_DURATION_SAFE
         setpoint_changed = (
             not self._solax_active
             or not rc_enabled
+            or not export_duration_ok
             or abs(command - self._solax_last_written_cmd) >= deadband
         )
         if setpoint_changed:
@@ -929,9 +932,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                             blocking=True,
                         )
                 # Extend hardware command-expiry timer (register 0x9F, default 4 s) so the
-                # inverter tolerates the 10-second tick gap without dropping RC mode.
-                if not self._solax_active:
-                    eid_exp = self._eid(CONF_ENTITY_SOLAX_EXPORT_DURATION)
+                # inverter tolerates the 10-second tick gap without dropping RC mode. Gated on
+                # a live readback (not self._solax_active) so a silent hardware reset of this
+                # register — or a write that lost the race with a Solax-modbus poll earlier —
+                # is detected and retried on the very next tick instead of being permanently
+                # skipped for the rest of the session.
+                if not export_duration_ok:
                     async with asyncio.timeout(5):
                         await self.hass.services.async_call(
                             "select", "select_option",
