@@ -180,8 +180,8 @@ def test_transient_ignored_when_inactive():
     assert command == 2000
 
 
-def test_transient_caps_discharge_increase():
-    """Discharge increases are limited to discharge_ramp_step during a transient."""
+def test_transient_allows_fast_discharge_increase():
+    """Discharge increases keep the normal (fast) ramp so a new spike is covered quickly."""
     command, _ = cmd(
         grid_actual=3000.0,
         grid_smoothed=3000.0,
@@ -191,23 +191,27 @@ def test_transient_caps_discharge_increase():
         ramp_step=1500.0,
         discharge_ramp_step=150.0,
     )
-    # raw_cmd = 3000, but discharge ramp-up is capped at 150 W/tick
-    assert command == 150
+    # raw_cmd = 3000, limited by the fast ramp_step (1500), not the 150 cap
+    assert command == 1500
 
 
-def test_transient_allows_fast_discharge_decrease():
-    """Discharge decreases keep the normal (fast) ramp so export is shed quickly."""
+def test_transient_caps_discharge_decrease():
+    """Discharge decreases are limited to discharge_ramp_step during a transient.
+
+    Holds the battery near the cycle's peak so the next on-phase is already
+    mostly covered, at the cost of exporting during the load's off-phase.
+    """
     command, _ = cmd(
         grid_actual=0.0,
-        grid_smoothed=0.0,        # element switched off; battery should back off
+        grid_smoothed=0.0,        # element switched off
         grid_target=0.0,
-        prev_cmd=2000.0,          # battery still parked high from the peak
+        prev_cmd=2000.0,          # battery parked high from the peak
         transient_active=True,
         ramp_step=1500.0,
         discharge_ramp_step=150.0,
     )
-    # delta = 0 - 2000 = -2000, limited by the fast ramp_step (1500), not the 150 cap
-    assert command == 500
+    # delta = 0 - 2000 = -2000, but discharge ramp-down is capped at 150 W/tick
+    assert command == 1850
 
 
 def test_transient_diag_flag_set():

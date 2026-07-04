@@ -88,11 +88,14 @@ def compute_voltx_command(
       - The tracking error is driven from grid_smoothed (an EMA of the grid)
         instead of the raw reading, so the battery tracks the *average* load
         rather than aliasing the fast on/off cycling.
-      - The ramp becomes asymmetric: discharge *increases* are limited to
-        discharge_ramp_step (slow) while discharge *decreases* keep the normal
-        ramp_step (fast).  This settles the battery toward the load's lower
-        envelope and sheds over-discharge within a tick, killing the export
-        spike that otherwise occurs when the element switches off.
+      - The ramp becomes asymmetric: discharge *decreases* are limited to
+        discharge_ramp_step (slow) while discharge *increases* keep the normal
+        ramp_step (fast).  This settles the battery toward the load's upper
+        envelope (the cycle's peak) and holds it there via slow decay, so the
+        next on-phase is already mostly covered.  Trades brief export during
+        the load's off-phase for avoiding import spikes at the next on-phase —
+        the right side of that trade when grid import is the expensive
+        direction (e.g. evening peak pricing).
     Safety quantities (uncontrolled power and the grid-safety clamp) always use
     the raw instantaneous grid_actual — the smoothing only feeds the correction.
 
@@ -188,13 +191,14 @@ def compute_voltx_command(
         mode = CoordinatorMode.DISCHARGE_LIMIT
 
     # Ramp — smooth transitions; grid safety clamp below can override it.
-    # During a transient the ramp is asymmetric: discharge increases (delta > 0)
-    # are limited to the slower discharge_ramp_step so the battery does not latch
-    # to load peaks, while discharge decreases (delta < 0) keep the fast ramp_step
-    # so any over-discharge into export is shed within a single tick.
-    up_step = discharge_ramp_step if (transient_active and discharge_ramp_step is not None) else ramp_step
+    # During a transient the ramp is asymmetric: discharge decreases (delta < 0)
+    # are limited to the slower discharge_ramp_step so the battery holds near the
+    # load's peak instead of decaying before the next on-phase, while discharge
+    # increases (delta > 0) keep the fast ramp_step so a new spike is covered
+    # quickly.
+    down_step = discharge_ramp_step if (transient_active and discharge_ramp_step is not None) else ramp_step
     delta = raw_cmd - prev_cmd
-    ramped_cmd = prev_cmd + max(-ramp_step, min(up_step, delta))
+    ramped_cmd = prev_cmd + max(-down_step, min(ramp_step, delta))
 
     # Hard grid limit clamp — overrides ramp if needed to stay within limits
     final_cmd = max(cmd_floor, min(cmd_ceil, ramped_cmd))
