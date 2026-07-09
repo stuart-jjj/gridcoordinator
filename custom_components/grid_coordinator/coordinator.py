@@ -12,6 +12,7 @@ from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
 from .budget import (
+    SOLAX_RESIDUAL_MODES,
     build_coordinator_data,
     compute_ev_current_limit,
     compute_solax_command,
@@ -675,17 +676,16 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
             solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
-            if mode in (
-                CoordinatorMode.SOC_FLOOR,
-                CoordinatorMode.SOC_CEILING,
-                CoordinatorMode.CHARGE_LIMIT,
-                CoordinatorMode.DISCHARGE_LIMIT,
-                CoordinatorMode.GRID_PRIORITY,
-            ):
-                # Voltx is constrained (SOC boundary or physical limit), or holding
-                # grid_priority's deadbeat setpoint (which ignores tier-2 entirely so any
-                # residual left after Voltx's ramp is otherwise uncorrected): Solax covers
-                # the residual.
+            if mode in SOLAX_RESIDUAL_MODES:
+                # Voltx is constrained at a hard SOC/physical boundary — it has
+                # genuinely stopped moving, so Solax can safely take the full
+                # instant residual. Deliberately excludes GRID_PRIORITY: that mode
+                # is a live ramp-driven convergence, and giving Solax the full
+                # residual there froze Voltx mid-ramp in production (see
+                # compute_solax_command's docstring). grid_priority ticks fall
+                # through to the tier1/tier2-share branch below instead, which is
+                # safe because it reacts to the live error each tick with no
+                # memory of a stale split.
                 solax_path = "resid"
                 solax_cmd, solax_mode = compute_solax_command(
                     voltx_mode=mode,

@@ -3,9 +3,11 @@
 import pytest
 
 from custom_components.grid_coordinator.budget import (
+    SOLAX_RESIDUAL_MODES,
     build_coordinator_data,
     compute_ev_current_limit,
     compute_solax_command,
+    compute_solax_share,
     compute_solax_tier1,
     compute_voltx_command,
 )
@@ -493,6 +495,27 @@ def test_solax_discharge_clamped_by_export_limit():
     assert mode == SolaxMode.FORCE_DISCHARGE
 
 
+def test_solax_command_excludes_grid_priority():
+    """GRID_PRIORITY must NOT trigger full-residual coverage.
+
+    Regression pin for a 2026-07-09 production incident: routing grid_priority
+    through this instant/full-residual formula let Solax zero the grid error the
+    moment Voltx's ramp got partway there, removing the error signal Voltx's
+    deadbeat loop needs to keep converging — Voltx froze mid-ramp (~9kW discharge)
+    while Solax held a permanent opposing charge (~3kW), indefinitely, not a
+    self-correcting oscillation. Solax still helps during grid_priority via the
+    proportional, damped tier-1/tier-2 share path in coordinator.py instead (see
+    test_grid_priority_standoff_resolves_via_proportional_share below).
+    """
+    cmd, mode = solax(
+        voltx_mode=CoordinatorMode.GRID_PRIORITY,
+        grid_after_voltx=5000.0,
+        grid_target=0.0,
+    )
+    assert cmd == 0.0
+    assert mode == SolaxMode.SELF_CONSUMPTION
+
+
 def test_solax_headroom_floor_reclamped_to_physical_limit():
     """The headroom-tightened grid floor must not command more discharge than the inverter
     can deliver — the final command stays within solax_max_discharge."""
@@ -508,6 +531,63 @@ def test_solax_headroom_floor_reclamped_to_physical_limit():
     )
     assert cmd == 2400.0
     assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+# ── compute_solax_share ───────────────────────────────────────────────────────
+
+_SHARE = dict(
+    voltx_soc=50.0,
+    solax_soc=50.0,
+    voltx_capacity_kwh=10.0,
+    solax_capacity_kwh=5.0,
+    cmd=1000.0,
+    sensitivity=0.01,
+    soc_deadband=5.0,
+)
+
+
+def share(**overrides) -> float:
+    return compute_solax_share(**{**_SHARE, **overrides})
+
+
+def test_share_base_when_balanced():
+    """Within the SOC deadband, share is just the capacity ratio."""
+    assert share(voltx_soc=50.0, solax_soc=50.0) == pytest.approx(5.0 / 15.0)
+
+
+def test_share_zero_cmd_returns_base():
+    """cmd == 0 has no direction to key the imbalance nudge off, so base_share is used."""
+    assert share(cmd=0.0, voltx_soc=80.0, solax_soc=20.0) == pytest.approx(5.0 / 15.0)
+
+
+def test_share_increases_for_fuller_battery_discharging():
+    """Solax fuller than Voltx + discharge command → share nudges above base (works harder)."""
+    base = 5.0 / 15.0
+    result = share(cmd=1000.0, voltx_soc=50.0, solax_soc=80.0)
+    assert result > base
+
+
+def test_share_decreases_for_emptier_battery_discharging():
+    """Solax emptier than Voltx + discharge command → share nudges below base (works less)."""
+    base = 5.0 / 15.0
+    result = share(cmd=1000.0, voltx_soc=80.0, solax_soc=50.0)
+    assert result < base
+
+
+def test_share_direction_reverses_for_charge_cmd():
+    """The same SOC imbalance nudges the opposite way when the command charges."""
+    discharge_share = share(cmd=1000.0, voltx_soc=50.0, solax_soc=80.0)
+    charge_share = share(cmd=-1000.0, voltx_soc=50.0, solax_soc=80.0)
+    assert charge_share < discharge_share
+
+
+def test_share_clamped_to_zero_and_one():
+    assert share(cmd=1000.0, voltx_soc=0.0, solax_soc=100.0, sensitivity=10.0) == 1.0
+    assert share(cmd=1000.0, voltx_soc=100.0, solax_soc=0.0, sensitivity=10.0) == 0.0
+
+
+def test_share_zero_total_capacity_returns_zero():
+    assert share(voltx_capacity_kwh=0.0, solax_capacity_kwh=0.0) == 0.0
 
 
 # ── compute_solax_tier1 ───────────────────────────────────────────────────────
@@ -562,6 +642,25 @@ def test_solax_tier1_discharges_to_hold_ceiling():
     cmd, mode = solax_t1(mpc_batt_cmd=-3000.0, grid_after_voltx=7500.0)
     assert cmd == 500.0
     assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+def test_solax_tier1_tier2_term_acts_when_mpc_batt_zero():
+    """tier2_term must move Solax even when mpc_batt_cmd/share contribute nothing.
+
+    This is the case that left Solax idle before the 2026-07-09 tier-2 sharing fix:
+    EMHASS plans zero battery use but a real grid deviation still needs correcting.
+    """
+    cmd, mode = solax_t1(mpc_batt_cmd=0.0, share=0.0, grid_after_voltx=0.0, tier2_term=750.0)
+    assert cmd == 750.0
+    assert mode == SolaxMode.FORCE_DISCHARGE
+
+
+def test_solax_tier1_tier2_term_adds_to_share_term():
+    """tier2_term and the mpc_batt share sum rather than overriding each other."""
+    # share×mpc = 0.33×(-3000) = -990; + tier2_term 200 = -790.
+    cmd, mode = solax_t1(mpc_batt_cmd=-3000.0, grid_after_voltx=2000.0, tier2_term=200.0)
+    assert cmd == -790.0
+    assert mode == SolaxMode.FORCE_CHARGE
 
 
 # ── compute_ev_current_limit ──────────────────────────────────────────────────
@@ -642,6 +741,130 @@ def test_ev_never_exceeds_max():
 
 
 # ── build_coordinator_data ────────────────────────────────────────────────────
+
+
+# ── grid_priority + Solax multi-tick regression ────────────────────────────────
+#
+# Reproduces the 2026-07-09 production incident end-to-end by driving several
+# ticks through the SAME dispatch policy coordinator.py uses (mode-based routing
+# between compute_solax_command's residual path and the tier1/tier2 share path),
+# feeding each tick's commands back into the next tick's grid_actual. Pure
+# budget.py functions only — no HA — so this runs anywhere the rest of the suite
+# does, and pins the emergent (not just per-call) behavior of the fix.
+
+def _run_grid_priority_ticks(load_schedule, *, ticks, ramp_step=300.0, tier2_gain=0.5,
+                              voltx_cap=10.0, solax_cap=5.0, sensitivity=0.01, soc_deadband=5.0):
+    """Drive `ticks` iterations of grid_priority tracking (target=0) against a
+    per-tick uncontrolled-load schedule, mirroring coordinator.py's dispatch.
+
+    Returns a list of (voltx_cmd, solax_cmd, grid_actual) per tick.
+    """
+    prev_voltx = prev_solax = 0.0
+    voltx_soc = solax_soc = 75.0
+    history = []
+    for tick in range(ticks):
+        true_load = load_schedule(tick)
+        grid_actual = true_load - prev_voltx - prev_solax
+
+        solax_tier2_share = compute_solax_share(
+            voltx_soc=voltx_soc, solax_soc=solax_soc,
+            voltx_capacity_kwh=voltx_cap, solax_capacity_kwh=solax_cap,
+            cmd=grid_actual - 0.0, sensitivity=sensitivity, soc_deadband=soc_deadband,
+        )
+        solax_share = compute_solax_share(
+            voltx_soc=voltx_soc, solax_soc=solax_soc,
+            voltx_capacity_kwh=voltx_cap, solax_capacity_kwh=solax_cap,
+            cmd=0.0, sensitivity=sensitivity, soc_deadband=soc_deadband,
+        )
+        voltx_tier2_gain = tier2_gain * (1.0 - solax_tier2_share)
+        solax_tier2_term = tier2_gain * solax_tier2_share * (grid_actual - 0.0)
+
+        command, mode, _diag = compute_voltx_command(
+            grid_actual=grid_actual, grid_target=0.0, mpc_batt_cmd=0.0,
+            prev_cmd=prev_voltx, soc=voltx_soc, soc_min=20.0, soc_max=95.0,
+            max_charge=5000.0, max_discharge=9000.0,
+            import_limit=5000.0, export_limit=5000.0, ramp_step=ramp_step,
+            plan_is_stale=False, tracking_deadband=0.0, headroom_reserve=0.0,
+            tier2_gain=voltx_tier2_gain, grid_priority=True,
+        )
+        grid_after_voltx = grid_actual + prev_voltx - command
+
+        if mode in SOLAX_RESIDUAL_MODES:
+            solax_cmd, _solax_mode = compute_solax_command(
+                voltx_mode=mode, grid_after_voltx=grid_after_voltx, grid_target=0.0,
+                solax_soc=solax_soc, solax_soc_min=20.0, solax_soc_max=95.0,
+                solax_max_charge=3000.0, solax_max_discharge=3000.0,
+                import_limit=5000.0, export_limit=5000.0, headroom_reserve=0.0,
+                prev_solax_cmd=prev_solax,
+            )
+        elif solax_share > 0 or solax_tier2_share > 0:
+            solax_cmd, _solax_mode = compute_solax_tier1(
+                mpc_batt_cmd=0.0, share=solax_share,
+                solax_soc=solax_soc, solax_soc_min=20.0, solax_soc_max=95.0,
+                solax_max_charge=3000.0, solax_max_discharge=3000.0,
+                grid_after_voltx=grid_after_voltx, import_limit=5000.0, export_limit=5000.0,
+                headroom_reserve=0.0, suppress_charge=False, prev_solax_cmd=prev_solax,
+                tier2_term=solax_tier2_term,
+            )
+        else:
+            solax_cmd = 0.0
+
+        history.append((command, solax_cmd, grid_actual))
+        prev_voltx, prev_solax = command, solax_cmd
+    return history
+
+
+def test_grid_priority_does_not_route_through_full_residual():
+    """Pins the real dispatch table (shared by budget.py's guard and coordinator.py's
+    routing) rather than a value hardcoded in the test — so this fails if
+    GRID_PRIORITY is ever re-added to SOLAX_RESIDUAL_MODES, regardless of which of
+    the two call sites regresses."""
+    assert CoordinatorMode.GRID_PRIORITY not in SOLAX_RESIDUAL_MODES
+    assert SOLAX_RESIDUAL_MODES == (
+        CoordinatorMode.SOC_FLOOR,
+        CoordinatorMode.SOC_CEILING,
+        CoordinatorMode.CHARGE_LIMIT,
+        CoordinatorMode.DISCHARGE_LIMIT,
+    )
+
+
+def test_grid_priority_standoff_resolves_via_proportional_share():
+    """A load spike then drop under grid_priority must NOT leave Voltx and Solax
+    permanently fighting each other (the 2026-07-09 incident): Voltx discharging
+    hard while Solax holds a large opposing charge, indefinitely.
+
+    Reproduces the incident's shape: a load spike (both batteries help hold grid
+    to target), then the load drops back off — the transient that triggered the
+    freeze, since Voltx's ramp lags the instantaneous drop.
+    """
+    def load(tick):
+        if tick < 5:
+            return 500.0
+        if tick < 25:
+            return 8000.0
+        return 500.0
+
+    history = _run_grid_priority_ticks(load, ticks=80)
+    final_voltx, final_solax, final_grid = history[-1]
+
+    # Settles on the true load being served by Voltx alone, not a permanent
+    # opposite-direction split (e.g. voltx=1700/solax=-1200 in the buggy version).
+    assert final_voltx == pytest.approx(500.0, abs=50)
+    assert final_solax == pytest.approx(0.0, abs=50)
+    assert final_grid == pytest.approx(0.0, abs=50)
+
+
+def test_grid_priority_solax_still_helps_during_transient():
+    """Solax should still assist while Voltx's ramp is catching up to a load spike
+    (the original 2026-07-09 SOC-drift motivation) — just not via the frozen
+    full-residual path."""
+    def load(tick):
+        return 500.0 if tick < 5 else 8000.0
+
+    history = _run_grid_priority_ticks(load, ticks=8)
+    # Mid-ramp, Solax should be contributing a nonzero discharge assist.
+    _voltx, solax_cmd, _grid = history[6]
+    assert solax_cmd > 0
 
 
 def test_build_coordinator_data_headroom():

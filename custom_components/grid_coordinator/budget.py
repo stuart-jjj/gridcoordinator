@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from .models import CoordinatorData, CoordinatorMode, SolaxMode, VoltxDiag
 
+# Voltx modes that mean it has genuinely stopped moving (hard SOC/physical boundary),
+# so compute_solax_command's full instant residual is safe: there is no ongoing
+# ramp-driven convergence for it to interfere with. Deliberately excludes
+# GRID_PRIORITY — see compute_solax_command's docstring. Single source of truth,
+# shared with coordinator.py's dispatch and the test suite, so the two can't drift
+# apart the way they did in the 2026-07-09 incident.
+SOLAX_RESIDUAL_MODES = (
+    CoordinatorMode.SOC_FLOOR,
+    CoordinatorMode.SOC_CEILING,
+    CoordinatorMode.CHARGE_LIMIT,
+    CoordinatorMode.DISCHARGE_LIMIT,
+)
+
 
 def compute_voltx_command(
     *,
@@ -378,13 +391,28 @@ def compute_solax_command(
 ) -> tuple[float, SolaxMode]:
     """Compute the Solax priority-2 battery command for one 10 s tick.
 
-    Only activates when Voltx is constrained (SOC_FLOOR, SOC_CEILING, CHARGE_LIMIT,
-    DISCHARGE_LIMIT) or holding grid_priority's deadbeat setpoint, and there is a
-    residual tracking error Voltx cannot cover.  grid_priority is included because
-    its deadbeat formula (uncontrolled − grid_target) ignores mpc_batt_cmd and the
-    tier-2 blend entirely, so any residual left after Voltx's ramp-limited step would
-    otherwise go uncorrected by Solax — this was the state occupying most of the
-    observed SOC-drift window (Voltx tracking grid_priority alone).
+    Only activates when voltx_mode is in SOLAX_RESIDUAL_MODES (a hard SOC/physical
+    boundary) and there is a residual tracking error Voltx cannot cover — i.e.
+    Voltx has physically stopped moving, so there is no ongoing convergence
+    process for an uncoordinated full-residual command to interfere with.
+
+    Deliberately excludes GRID_PRIORITY. That deadbeat formula (uncontrolled −
+    grid_target, see compute_voltx_command) is a *live* convergence process, not a
+    static boundary: it recomputes every tick from grid_actual + prev_cmd, with no
+    "share" concept of its own. Routing grid_priority through this full/instant
+    residual formula (tried 2026-07-09, reverted the same day) caused a real
+    production incident: Solax's unramped correction zeroed the grid error the
+    moment Voltx's ramp got partway there, which removed the very error signal
+    Voltx's deadbeat loop needs to keep converging — freezing Voltx mid-ramp with
+    Solax permanently holding an offsetting command (observed as Voltx discharging
+    ~9kW while Solax charged ~3kW indefinitely, a sustained wasteful standoff, not
+    a self-correcting oscillation). Solax still participates during grid_priority
+    ticks via the proportional, damped tier-1/tier-2 share path in coordinator.py
+    (compute_solax_share / compute_solax_tier1's tier2_term) — that path is safe
+    here because it is keyed off the *live* grid error each tick (no memory of a
+    stale split), so it naturally decays back to zero once Voltx's ramp catches up
+    instead of latching onto a permanent nonzero offset. See
+    project_solax_grid_priority_freeze memory for the full incident writeup.
 
     Sign convention: same as voltx_command — positive = discharge, negative = charge.
     grid_after_voltx: projected grid power after Voltx command is applied,
@@ -393,13 +421,7 @@ def compute_solax_command(
                       prev_solax_cmd is added back to get the Solax-free baseline
                       before computing raw_cmd — analogous to how Voltx uses prev_cmd.
     """
-    if voltx_mode not in (
-        CoordinatorMode.SOC_FLOOR,
-        CoordinatorMode.SOC_CEILING,
-        CoordinatorMode.CHARGE_LIMIT,
-        CoordinatorMode.DISCHARGE_LIMIT,
-        CoordinatorMode.GRID_PRIORITY,
-    ):
+    if voltx_mode not in SOLAX_RESIDUAL_MODES:
         return 0.0, SolaxMode.SELF_CONSUMPTION
 
     # Undo the current Solax contribution so raw_cmd represents the full residual.
