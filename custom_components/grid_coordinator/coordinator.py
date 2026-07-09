@@ -15,8 +15,8 @@ from .budget import (
     build_coordinator_data,
     compute_ev_current_limit,
     compute_solax_command,
+    compute_solax_share,
     compute_solax_tier1,
-    compute_solax_tier1_share,
     compute_voltx_command,
 )
 from .const import (
@@ -489,6 +489,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         variance_threshold = self._transient_variance_threshold
         grid_stdev = pstdev(self._grid_history) if len(self._grid_history) >= 3 else 0.0
         transient_active = variance_threshold > 0 and grid_stdev > variance_threshold
+        # Mirrors the grid_track fallback inside compute_voltx_command exactly, so the
+        # tier-2 error used to size Solax's share matches what Voltx itself tracks.
+        grid_track = self._grid_ema if (transient_active and self._grid_ema is not None) else grid_actual
 
         # ── manual override ────────────────────────────────────────────────
         # Expire and clear the override if its duration has elapsed.
@@ -558,36 +561,52 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         mon_load_reserve = self._headroom_reserve(hass)
         headroom_reserve = max(ev_reserve, mon_load_reserve)
 
-        # ── compute Solax tier-1 share (dynamic SOC-balance) ──────────────
+        # ── compute Solax share (dynamic SOC-balance, both tiers) ─────────
         # Base share = solax_capacity / total_capacity — the fraction that makes both
         # batteries' SOC change at equal rate (dSOC/dt = power / rated_capacity_kWh).
         # Sensitivity adjustment nudges the share to converge any existing imbalance.
         # Requires both capacity entities to be configured; falls back to 0 (Solax
         # residual-only) if either is absent or zero.
-        # Taper the share to zero as Solax SOC approaches its ceiling so Voltx absorbs
-        # the full EMHASS charge command when Solax is full.
+        # Computed independently for each tier: solax_share is keyed off mpc_batt_cmd's
+        # direction, solax_tier2_share off the tier-2 grid error's direction — so an SOC
+        # imbalance still pulls Solax into tier-2 correction even on a tick where EMHASS
+        # plans zero battery use (mpc_batt_cmd == 0), which previously left Solax idle
+        # (see project_unplanned_load_tier_split memory).
+        # Taper both shares to zero as Solax SOC approaches its ceiling so Voltx absorbs
+        # the full charge command when Solax is full.
         solax_soc = float("nan")
         solax_share = 0.0
+        solax_tier2_share = 0.0
         if self._solax_enabled():
             solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
             voltx_cap = _float(hass, self._eid(CONF_ENTITY_VOLTX_CAPACITY), 0.0)
             solax_cap = _float(hass, self._eid(CONF_ENTITY_SOLAX_CAPACITY), 0.0)
             if voltx_cap > 0 and solax_cap > 0:
-                solax_share = compute_solax_tier1_share(
+                solax_share = compute_solax_share(
                     voltx_soc=soc,
                     solax_soc=solax_soc,
                     voltx_capacity_kwh=voltx_cap,
                     solax_capacity_kwh=solax_cap,
-                    tier1_cmd=effective_mpc_batt,
+                    cmd=effective_mpc_batt,
                     sensitivity=self._soc_balance_sensitivity,
                     soc_deadband=self._soc_balance_deadband,
                 )
-        if solax_share > 0.0:
+                solax_tier2_share = compute_solax_share(
+                    voltx_soc=soc,
+                    solax_soc=solax_soc,
+                    voltx_capacity_kwh=voltx_cap,
+                    solax_capacity_kwh=solax_cap,
+                    cmd=grid_track - effective_target,
+                    sensitivity=self._soc_balance_sensitivity,
+                    soc_deadband=self._soc_balance_deadband,
+                )
+        if solax_share > 0.0 or solax_tier2_share > 0.0:
             _s_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             _taper = min(1.0, max(0.0, _s_soc_max - solax_soc) / DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND)
-            effective_solax_share = solax_share * _taper
         else:
-            effective_solax_share = 0.0
+            _taper = 1.0
+        effective_solax_share = solax_share * _taper
+        effective_solax_tier2_share = solax_tier2_share * _taper
 
         # ── compute command (pure function, no HA calls) ───────────────────
         voltx_mpc_batt = effective_mpc_batt * (1.0 - effective_solax_share)
@@ -599,6 +618,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # battery.  The ev headroom_reserve still tightens cmd_floor so both batteries ramp
         # down charging — and discharge if required — to protect the import-headroom ceiling.
         effective_tier2_gain = 0.0 if ev_active else self._tier2_gain
+        # Voltx's own tier-2 gain shrinks by Solax's tier-2 share; Solax's absolute
+        # contribution (solax_tier2_term) is computed below using the same grid_track/
+        # effective_target error so the two portions sum to the undivided correction.
+        voltx_tier2_gain = effective_tier2_gain * (1.0 - effective_solax_tier2_share)
+        solax_tier2_term = effective_tier2_gain * effective_solax_tier2_share * (grid_track - effective_target)
 
         prev_cmd = self._prev_cmd  # capture for logging before it is overwritten
         command, mode, diag = compute_voltx_command(
@@ -617,7 +641,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_is_stale=plan_is_stale,
             tracking_deadband=self._tracking_deadband,
             headroom_reserve=headroom_reserve,
-            tier2_gain=effective_tier2_gain,
+            tier2_gain=voltx_tier2_gain,
             grid_priority=grid_priority,
             grid_smoothed=self._grid_ema,
             transient_active=transient_active,
@@ -656,8 +680,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 CoordinatorMode.SOC_CEILING,
                 CoordinatorMode.CHARGE_LIMIT,
                 CoordinatorMode.DISCHARGE_LIMIT,
+                CoordinatorMode.GRID_PRIORITY,
             ):
-                # Voltx is constrained (SOC boundary or physical limit): Solax covers the residual.
+                # Voltx is constrained (SOC boundary or physical limit), or holding
+                # grid_priority's deadbeat setpoint (which ignores tier-2 entirely so any
+                # residual left after Voltx's ramp is otherwise uncorrected): Solax covers
+                # the residual.
                 solax_path = "resid"
                 solax_cmd, solax_mode = compute_solax_command(
                     voltx_mode=mode,
@@ -673,11 +701,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     headroom_reserve=headroom_reserve,
                     prev_solax_cmd=self._solax_last_written_cmd,
                 )
-            elif solax_share > 0 or headroom_reserve > 0:
+            elif solax_share > 0 or solax_tier2_share > 0 or headroom_reserve > 0:
                 # Voltx in normal tracking (incl. holding a headroom ceiling): Solax executes
-                # its tier-1 share of mpc_batt_cmd, clamped to protect the import headroom so it
-                # ramps down charging — and discharges if required — alongside Voltx.  When Voltx
-                # is already the one holding the ceiling, Solax yields its charging share (it is
+                # its share of mpc_batt_cmd plus its share of the tier-2 grid correction
+                # (solax_tier2_term), clamped to protect the import headroom so it ramps down
+                # charging — and discharges if required — alongside Voltx.  When Voltx is
+                # already the one holding the ceiling, Solax yields its charging share (it is
                 # computed second) so the two batteries do not round-trip through each other.
                 ceiling_binding = mode in (
                     CoordinatorMode.LOAD_HEADROOM,
@@ -700,6 +729,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     headroom_reserve=headroom_reserve,
                     suppress_charge=ceiling_binding,
                     prev_solax_cmd=self._solax_last_written_cmd,
+                    tier2_term=solax_tier2_term,
                 )
             else:
                 solax_path = "idle"
@@ -728,7 +758,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             "floor=%.0fW ceil=%.0fW maxc=%.0fW maxd=%.0fW soc=%.0f%% [%.0f..%.0f] "
             "plan_age=%.1fmin stale=%s ev=%s t2g=%.2f gp=%s headroom=%.0fW "
             "transient=%s gstdev=%.0fW gema=%.0fW | "
-            "solax cmd=%.0fW mode=%s path=%s supp=%s soc=%.0f%% share=%.2f(taper=%.2f) after_voltx=%.0fW prev=%.0fW | "
+            "solax cmd=%.0fW mode=%s path=%s supp=%s soc=%.0f%% share=%.2f(taper=%.2f) "
+            "t2share=%.2f t2term=%.0fW after_voltx=%.0fW prev=%.0fW | "
             "ev_throttle=%s limit=%sA proj_grid=%.0fW",
             grid_actual,
             grid_age_s,
@@ -751,7 +782,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             plan_age,
             plan_is_stale,
             ev_active,
-            effective_tier2_gain,
+            voltx_tier2_gain,
             grid_priority,
             headroom_reserve,
             transient_active,
@@ -764,6 +795,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_soc,
             effective_solax_share,
             effective_solax_share / solax_share if solax_share > 0.0 else 1.0,
+            effective_solax_tier2_share,
+            solax_tier2_term,
             grid_after_voltx,
             prev_solax_cmd,
             ev_throttle_active,

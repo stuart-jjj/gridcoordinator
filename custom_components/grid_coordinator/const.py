@@ -150,8 +150,8 @@ CONF_SOC_BALANCE_SENSITIVITY = "soc_balance_sensitivity"
 CONF_SOC_BALANCE_DEADBAND = "soc_balance_deadband"
 
 # ── Solax defaults ─────────────────────────────────────────────────────────────
-DEFAULT_SOLAX_MAX_CHARGE = 2400        # W — X1 AC G3 hardware limit
-DEFAULT_SOLAX_MAX_DISCHARGE = 2400     # W
+DEFAULT_SOLAX_MAX_CHARGE = 3000        # W — X1 AC G3 hardware limit
+DEFAULT_SOLAX_MAX_DISCHARGE = 3000     # W
 DEFAULT_SOLAX_AUTOREPEAT_DURATION = 90  # s — HA software autorepeat window; hardware expiry controlled by export_duration (0x9F)
 SOLAX_EXPORT_DURATION_SAFE = "15 Minutes"  # written to select.solax_export_duration (register 0x9F) on first activation
 DEFAULT_SOLAX_CMD_DEADBAND = 50        # W — suppress command updates smaller than this

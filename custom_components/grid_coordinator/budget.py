@@ -230,17 +230,17 @@ def compute_voltx_command(
     return round(final_cmd), mode, diag
 
 
-def compute_solax_tier1_share(
+def compute_solax_share(
     *,
     voltx_soc: float,
     solax_soc: float,
     voltx_capacity_kwh: float,
     solax_capacity_kwh: float,
-    tier1_cmd: float,
+    cmd: float,
     sensitivity: float,
     soc_deadband: float = 5.0,
 ) -> float:
-    """Compute the Solax tier-1 share fraction for one tick.
+    """Compute the Solax share fraction for one tick, for either control tier.
 
     Base share = solax_capacity / total_capacity — the fraction at which both
     batteries' SOC changes at equal rate (dSOC/dt = power / capacity).
@@ -248,13 +248,19 @@ def compute_solax_tier1_share(
     When the SOC difference exceeds soc_deadband, a proportional adjustment
     nudges the share to converge the imbalance:
 
-      delta = sensitivity × (solax_soc − voltx_soc) × sign(tier1_cmd)
+      delta = sensitivity × (solax_soc − voltx_soc) × sign(cmd)
 
     A positive delta increases Solax share when it is fuller and the command
     is discharging (make the fuller battery work harder), or when it is emptier
     and the command is charging (give the emptier battery more charge work).
     The sign reverses with the command direction, so the correction always
     pushes the SOCs toward each other.
+
+    Called once per tier: `cmd` is `mpc_batt_cmd` for the tier-1 share, or the
+    raw tier-2 grid error (grid_track − grid_target) for the tier-2 share.
+    Keying tier-2's share off the grid error rather than the tier-1 command
+    means it still reacts to an SOC imbalance even when EMHASS plans zero
+    battery use (mpc_batt_cmd == 0) — the case that previously left Solax idle.
 
     Returns a float clamped to [0.0, 1.0].
     """
@@ -263,9 +269,9 @@ def compute_solax_tier1_share(
         return 0.0
     base_share = solax_capacity_kwh / total
     imbalance = solax_soc - voltx_soc
-    if tier1_cmd == 0 or abs(imbalance) <= soc_deadband:
+    if cmd == 0 or abs(imbalance) <= soc_deadband:
         return base_share
-    delta = sensitivity * imbalance * (1.0 if tier1_cmd > 0 else -1.0)
+    delta = sensitivity * imbalance * (1.0 if cmd > 0 else -1.0)
     return max(0.0, min(1.0, base_share + delta))
 
 
@@ -284,12 +290,24 @@ def compute_solax_tier1(
     headroom_reserve: float = 0.0,
     suppress_charge: bool = False,
     prev_solax_cmd: float = 0.0,
+    tier2_term: float = 0.0,
 ) -> tuple[float, SolaxMode]:
-    """Compute Solax command as a direct share of the EMHASS battery setpoint.
+    """Compute Solax command as a share of the EMHASS battery setpoint plus a
+    share of the tier-2 grid correction.
 
     Used when Voltx is in normal tracking (not SOC-bounded): Solax executes
-    (share × mpc_batt_cmd), while Voltx executes the remaining (1−share) fraction
-    plus the tier-2 grid correction.
+    (share × mpc_batt_cmd) + tier2_term, while Voltx executes the remaining
+    (1−share) fraction of mpc_batt_cmd plus its own (correspondingly reduced)
+    share of the tier-2 grid correction.
+
+    tier2_term is the caller-computed Solax share of tier-2
+    (tier2_gain × tier2_share × (grid_track − grid_target)) — pre-scaled so this
+    function only needs to add it, mirroring how Voltx's tier2_gain is pre-reduced
+    by (1 − tier2_share) before compute_voltx_command is called.  Passing it as an
+    already-scaled term (rather than gain/share/error separately) keeps this
+    function agnostic to which tier drove the request, so a zero mpc_batt_cmd
+    (share × 0) doesn't leave Solax idle when there's still a real grid error to
+    correct — the case that previously left it idle during EMHASS-unplanned load.
 
     A grid-safety clamp keeps projected grid import within (import_limit −
     headroom_reserve), mirroring Voltx's cmd_floor.  This is what makes Solax ramp
@@ -308,7 +326,7 @@ def compute_solax_tier1(
     is added back so the clamp is computed on the Solax-free baseline (same pattern as
     compute_solax_command).  SOC and inverter physical limits apply last.
     """
-    raw_cmd = mpc_batt_cmd * share
+    raw_cmd = mpc_batt_cmd * share + tier2_term
 
     # Grid-safety / headroom clamp on the Solax-free baseline, mirroring Voltx:
     # keep projected grid within [−export_limit, import_limit − headroom_reserve].
@@ -361,7 +379,12 @@ def compute_solax_command(
     """Compute the Solax priority-2 battery command for one 10 s tick.
 
     Only activates when Voltx is constrained (SOC_FLOOR, SOC_CEILING, CHARGE_LIMIT,
-    or DISCHARGE_LIMIT) and there is a residual tracking error Voltx cannot cover.
+    DISCHARGE_LIMIT) or holding grid_priority's deadbeat setpoint, and there is a
+    residual tracking error Voltx cannot cover.  grid_priority is included because
+    its deadbeat formula (uncontrolled − grid_target) ignores mpc_batt_cmd and the
+    tier-2 blend entirely, so any residual left after Voltx's ramp-limited step would
+    otherwise go uncorrected by Solax — this was the state occupying most of the
+    observed SOC-drift window (Voltx tracking grid_priority alone).
 
     Sign convention: same as voltx_command — positive = discharge, negative = charge.
     grid_after_voltx: projected grid power after Voltx command is applied,
@@ -375,6 +398,7 @@ def compute_solax_command(
         CoordinatorMode.SOC_CEILING,
         CoordinatorMode.CHARGE_LIMIT,
         CoordinatorMode.DISCHARGE_LIMIT,
+        CoordinatorMode.GRID_PRIORITY,
     ):
         return 0.0, SolaxMode.SELF_CONSUMPTION
 
