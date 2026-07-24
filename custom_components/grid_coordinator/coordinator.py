@@ -32,6 +32,7 @@ from .const import (
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
     CONF_ENTITY_SOLAX_CAPACITY,
+    CONF_ENTITY_SOLAX_CONTROL_ENABLE,
     CONF_ENTITY_SOLAX_EXPORT_DURATION,
     CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
     CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
@@ -42,6 +43,7 @@ from .const import (
     CONF_ENTITY_SOLAX_SOC_MIN,
     CONF_ENTITY_VOLTX_CAPACITY,
     CONF_ENTITY_VOLTX_CMD,
+    CONF_ENTITY_VOLTX_CONTROL_ENABLE,
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
     CONF_ENTITY_VOLTX_SOC,
@@ -382,6 +384,20 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         entity = str(self._opt(CONF_ENTITY_GRID_PRIORITY, "")).strip()
         return bool(entity) and _str(hass, entity, "off").lower() in ("on", "true", "yes", "1")
 
+    def _control_enabled(self, hass: HomeAssistant, key: str) -> bool:
+        """Return True when the per-battery control-enable helper permits control.
+
+        The helper is optional: when unconfigured (blank) control is ON by default.
+        When configured, control is ON while the entity reads truthy (on/true/yes/1),
+        matching the grid-priority trigger parsing.  A configured-but-unavailable helper
+        defaults to ON (fail-safe: keep controlling) so a flaky helper never silently
+        strands a battery — the global enable gate remains the way to stop everything.
+        """
+        entity = str(self._opt(key, "")).strip()
+        if not entity:
+            return True
+        return _str(hass, entity, "on").lower() in ("on", "true", "yes", "1")
+
     # ── override control ──────────────────────────────────────────────────────
 
     def set_override(
@@ -562,6 +578,33 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         mon_load_reserve = self._headroom_reserve(hass)
         headroom_reserve = max(ev_reserve, mon_load_reserve)
 
+        # ── per-battery control switches ───────────────────────────────────
+        # Each battery's control can be turned off with an optional binary helper
+        # (blank helper → control on by default).  A battery whose control is off is
+        # released to native self-consumption and never commanded this tick.
+        voltx_control = self._control_enabled(hass, CONF_ENTITY_VOLTX_CONTROL_ENABLE)
+        solax_on = self._solax_enabled() and self._control_enabled(
+            hass, CONF_ENTITY_SOLAX_CONTROL_ENABLE
+        )
+        if not voltx_control:
+            # Voltx (primary) control off: release it and, if Solax control is on, promote
+            # Solax to sole grid tracker running the full 2-tier controller on its own params.
+            return await self._async_voltx_disabled_tick(
+                grid_actual=grid_actual,
+                grid_age_s=grid_age_s,
+                grid_target=grid_target,
+                effective_target=effective_target,
+                effective_mpc_batt=effective_mpc_batt,
+                plan_is_stale=plan_is_stale,
+                plan_age=plan_age,
+                headroom_reserve=headroom_reserve,
+                ev_active=ev_active,
+                ev_reserve=ev_reserve,
+                mon_load_reserve=mon_load_reserve,
+                transient_active=transient_active,
+                solax_on=solax_on,
+            )
+
         # ── compute Solax share (dynamic SOC-balance, both tiers) ─────────
         # Base share = solax_capacity / total_capacity — the fraction that makes both
         # batteries' SOC change at equal rate (dSOC/dt = power / rated_capacity_kWh).
@@ -578,7 +621,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         solax_soc = float("nan")
         solax_share = 0.0
         solax_tier2_share = 0.0
-        if self._solax_enabled():
+        if solax_on:
             solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
             voltx_cap = _float(hass, self._eid(CONF_ENTITY_VOLTX_CAPACITY), 0.0)
             solax_cap = _float(hass, self._eid(CONF_ENTITY_SOLAX_CAPACITY), 0.0)
@@ -671,7 +714,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         prev_solax_cmd = self._solax_last_written_cmd  # capture for logging
         solax_path = "off"      # which Solax branch ran this tick (diagnostic)
         solax_suppress = False  # tier-1 charge yielded because Voltx owns the ceiling
-        if self._solax_enabled():
+        if solax_on:
             solax_soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
             solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
@@ -742,6 +785,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
             await self._async_write_solax(solax_cmd)
         else:
+            # Solax not configured, or its control switch is off — release it if we were
+            # commanding it, then leave it to native self-consumption.
+            if self._solax_enabled() and self._solax_active:
+                await self._async_enter_solax_self_consumption()
             solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
 
         # ── EV emergency charge-current throttle (layer 3) ─────────────────
@@ -809,6 +856,135 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             grid_actual=grid_actual,
             grid_target=grid_target,
             voltx_command=command,
+            import_limit=self._import_limit,
+            export_limit=self._export_limit,
+            plan_age_minutes=plan_age,
+            override_mode=None,
+            mpc_batt_power=effective_mpc_batt,
+            solax_command=solax_cmd,
+            solax_mode=solax_mode,
+            ev_current_limit=ev_current_limit,
+            ev_throttle_active=ev_throttle_active,
+        )
+
+    # ── Voltx-control-off tick ────────────────────────────────────────────────
+
+    async def _async_voltx_disabled_tick(
+        self,
+        *,
+        grid_actual: float,
+        grid_age_s: float,
+        grid_target: float,
+        effective_target: float,
+        effective_mpc_batt: float,
+        plan_is_stale: bool,
+        plan_age: float,
+        headroom_reserve: float,
+        ev_active: bool,
+        ev_reserve: float,
+        mon_load_reserve: float,
+        transient_active: bool,
+        solax_on: bool,
+    ) -> CoordinatorData:
+        """One tick when Voltx (primary) control is switched off.
+
+        Voltx is released to native self-consumption and never commanded.  When Solax
+        control is on it is promoted to sole grid tracker: the full 2-tier controller
+        (compute_voltx_command) runs on Solax's own SOC/limits and the result is written
+        to Solax — so it tracks the EMHASS plan + grid correction alone, bounded by its
+        own (smaller) inverter limits and SOC constraints.  When Solax is also off (or not
+        configured) both inverters run native self-consumption.  The EV emergency throttle
+        still runs, since it is a grid-safety backstop independent of battery control.
+        """
+        hass = self.hass
+
+        # Release Voltx and clear its ramp anchor so a clean ramp resumes if re-enabled.
+        await self._async_enter_self_consumption()
+        self._prev_cmd = 0.0
+
+        prev_solax_cmd = self._solax_last_written_cmd  # capture before this tick's write
+        solax_soc = float("nan")
+
+        if solax_on:
+            solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
+            solax_soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
+            solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
+            solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
+            solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
+            grid_priority = self._grid_priority_active(hass, effective_target)
+            # Tier 2 still off during EV (its load is served by grid import, not the battery).
+            effective_tier2_gain = 0.0 if ev_active else self._tier2_gain
+            solax_cmd, s_mode, _diag = compute_voltx_command(
+                grid_actual=grid_actual,
+                grid_target=effective_target,
+                mpc_batt_cmd=effective_mpc_batt,
+                prev_cmd=prev_solax_cmd,
+                soc=solax_soc,
+                soc_min=solax_soc_min,
+                soc_max=solax_soc_max,
+                max_charge=solax_max_charge,
+                max_discharge=solax_max_discharge,
+                import_limit=self._import_limit,
+                export_limit=self._export_limit,
+                ramp_step=self._ramp_step,
+                plan_is_stale=plan_is_stale,
+                tracking_deadband=self._tracking_deadband,
+                headroom_reserve=headroom_reserve,
+                tier2_gain=effective_tier2_gain,
+                grid_priority=grid_priority,
+                grid_smoothed=self._grid_ema,
+                transient_active=transient_active,
+                discharge_ramp_step=self._transient_discharge_ramp_step,
+            )
+            # Same EV-reserve remap as the Voltx path so the mode reads ev_charging.
+            if s_mode == CoordinatorMode.LOAD_HEADROOM and ev_active and ev_reserve >= mon_load_reserve:
+                s_mode = CoordinatorMode.EV_CHARGING
+            # Zero deadband: suppress tiny commands to avoid needless inverter activity.
+            solax_zero_deadband = float(self._opt(CONF_SOLAX_ZERO_DEADBAND, DEFAULT_SOLAX_ZERO_DEADBAND))
+            if solax_zero_deadband > 0 and abs(solax_cmd) <= solax_zero_deadband:
+                solax_cmd = 0.0
+            await self._async_write_solax(solax_cmd)
+            mode = s_mode
+            if solax_cmd > 0:
+                solax_mode = SolaxMode.FORCE_DISCHARGE
+            elif solax_cmd < 0:
+                solax_mode = SolaxMode.FORCE_CHARGE
+            elif s_mode == CoordinatorMode.SOC_FLOOR:
+                solax_mode = SolaxMode.SOC_FLOOR
+            elif s_mode == CoordinatorMode.SOC_CEILING:
+                solax_mode = SolaxMode.SOC_CEILING
+            else:
+                solax_mode = SolaxMode.SELF_CONSUMPTION
+        else:
+            # Solax also off (or not configured): release it too.
+            if self._solax_enabled() and self._solax_active:
+                await self._async_enter_solax_self_consumption()
+            solax_cmd = 0.0
+            solax_mode = SolaxMode.SELF_CONSUMPTION
+            mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
+
+        # EV emergency throttle — grid-safety backstop; Voltx contributes 0 (released).
+        projected_grid = grid_actual + prev_solax_cmd - solax_cmd
+        ev_current_limit, ev_throttle_active = await self._async_ev_emergency_throttle(
+            projected_grid, ev_active
+        )
+
+        LOGGER.debug(
+            "tick | VOLTX CONTROL OFF | grid=%.0fW (age=%.0fs) target=%.0fW mpc_batt=%.0fW "
+            "mode=%s | solax cmd=%.0fW mode=%s sole=%s soc=%.0f%% prev=%.0fW headroom=%.0fW "
+            "ev=%s | ev_throttle=%s limit=%sA proj_grid=%.0fW",
+            grid_actual, grid_age_s, effective_target, effective_mpc_batt, mode,
+            solax_cmd, solax_mode, solax_on, solax_soc, prev_solax_cmd, headroom_reserve,
+            ev_active, ev_throttle_active,
+            f"{ev_current_limit:.0f}" if ev_current_limit is not None else "-",
+            projected_grid,
+        )
+
+        return build_coordinator_data(
+            mode=mode,
+            grid_actual=grid_actual,
+            grid_target=grid_target,
+            voltx_command=0.0,
             import_limit=self._import_limit,
             export_limit=self._export_limit,
             plan_age_minutes=plan_age,
