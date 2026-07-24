@@ -19,6 +19,7 @@ from .const import (
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
     CONF_ENTITY_SOLAX_CAPACITY,
+    CONF_ENTITY_SOLAX_CONTROL_ENABLE,
     CONF_ENTITY_SOLAX_EXPORT_DURATION,
     CONF_ENTITY_SOLAX_RC_ACTIVE_POWER,
     CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION,
@@ -29,6 +30,7 @@ from .const import (
     CONF_ENTITY_SOLAX_SOC_MIN,
     CONF_ENTITY_VOLTX_CAPACITY,
     CONF_ENTITY_VOLTX_CMD,
+    CONF_ENTITY_VOLTX_CONTROL_ENABLE,
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
     CONF_ENTITY_VOLTX_SOC,
@@ -253,6 +255,7 @@ def _solax_schema(defaults: dict) -> vol.Schema:
             vol.Optional(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION, default=defaults.get(CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_RC_AUTOREPEAT_DURATION])): _TEXT,
             vol.Optional(CONF_ENTITY_SOLAX_RC_TRIGGER, default=defaults.get(CONF_ENTITY_SOLAX_RC_TRIGGER, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_RC_TRIGGER])): _TEXT,
             vol.Optional(CONF_ENTITY_SOLAX_EXPORT_DURATION, default=defaults.get(CONF_ENTITY_SOLAX_EXPORT_DURATION, ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_EXPORT_DURATION])): _TEXT,
+            vol.Optional(CONF_ENTITY_SOLAX_CONTROL_ENABLE, default=defaults.get(CONF_ENTITY_SOLAX_CONTROL_ENABLE, "")): _TEXT,
         }
     )
 
@@ -273,6 +276,7 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_ENTITY_ENABLED, default=defaults.get(CONF_ENTITY_ENABLED, ENTITY_ID_DEFAULTS[CONF_ENTITY_ENABLED])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_CMD, default=defaults.get(CONF_ENTITY_VOLTX_CMD, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_CMD])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_WORK_MODE, default=defaults.get(CONF_ENTITY_VOLTX_WORK_MODE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_WORK_MODE])): _TEXT,
+            vol.Optional(CONF_ENTITY_VOLTX_CONTROL_ENABLE, default=defaults.get(CONF_ENTITY_VOLTX_CONTROL_ENABLE, "")): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGER, default=defaults.get(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGE_CURRENT, default=defaults.get(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)): _TEXT,
             vol.Optional(CONF_ENTITY_MON_LOAD_1, default=defaults.get(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)): _TEXT,
@@ -432,6 +436,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         else:
             entity_defaults = {k: self._current(k, prod_id) for k, prod_id in ENTITY_ID_DEFAULTS.items()}
         # Optional feature entities (not in ENTITY_ID_DEFAULTS; production defaults used)
+        entity_defaults[CONF_ENTITY_VOLTX_CONTROL_ENABLE] = self._current(CONF_ENTITY_VOLTX_CONTROL_ENABLE, "")
         entity_defaults[CONF_ENTITY_EV_CHARGER] = self._current(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)
         entity_defaults[CONF_ENTITY_EV_CHARGE_CURRENT] = self._current(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)
         entity_defaults[CONF_ENTITY_MON_LOAD_1] = self._current(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)
@@ -467,6 +472,10 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             k: self._current(k, SIM_ENTITY_IDS[k] if test_mode else ENTITY_ID_DEFAULTS[k])
             for k in solax_keys
         }
+        # Optional per-battery control switch (not in the entity-ID default maps; blank = on).
+        solax_defaults[CONF_ENTITY_SOLAX_CONTROL_ENABLE] = self._current(
+            CONF_ENTITY_SOLAX_CONTROL_ENABLE, ""
+        )
 
         return self.async_show_form(
             step_id="solax",

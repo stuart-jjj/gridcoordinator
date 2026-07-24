@@ -62,6 +62,10 @@ CONF_ENTITY_ENABLED = "entity_enabled"
 CONF_ENTITY_VOLTX_CMD = "entity_voltx_cmd"
 CONF_ENTITY_VOLTX_WORK_MODE = "entity_voltx_work_mode"
 
+# Per-battery control-enable helpers (optional binary input; blank → control on by default)
+CONF_ENTITY_VOLTX_CONTROL_ENABLE = "entity_voltx_control_enable"
+CONF_ENTITY_SOLAX_CONTROL_ENABLE = "entity_solax_control_enable"
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_IMPORT_LIMIT = 12000        # W — safe single-phase limit
 DEFAULT_EXPORT_LIMIT = 10000        # W — network export rule

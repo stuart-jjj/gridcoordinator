@@ -78,6 +78,7 @@
           "entity_enabled": "Enable/disable gate (input_boolean or switch)",
           "entity_voltx_cmd": "Battery charge/discharge command (number entity)",
           "entity_voltx_work_mode": "Inverter work mode (select entity)",
+          "entity_voltx_control_enable": "Voltx control enable (optional binary helper)",
           "entity_ev_charger": "EV charger power sensor (optional)",
           "entity_ev_charge_current": "EV charge-current setpoint number entity (optional)",
           "entity_monitored_load_1": "Monitored load 1 power sensor (optional)",
@@ -95,6 +96,7 @@
           "entity_enabled": "When off, the coordinator is dormant and leaves the inverter untouched.",
           "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
           "entity_voltx_work_mode": "Must support the 'Custom' option.",
+          "entity_voltx_control_enable": "Boolean helper (input_boolean, switch or template binary_sensor). GridCoordinator controls the Voltx (primary) battery only while this is 'on'. Leave blank to always control Voltx. When off, Voltx is released to native self-consumption and — if Solax control is on — Solax is promoted to sole grid tracker.",
           "entity_ev_charger": "Power sensor for the EV charger circuit. Leave blank to disable EV charge awareness.",
           "entity_ev_charge_current": "Number entity for the EV charge-current setpoint (Amps), e.g. number.ziggy_charge_current. Written only while the emergency throttle is engaged. Leave blank to disable the throttle.",
           "entity_monitored_load_1": "Power sensor for a large transient load (e.g. oven). Leave blank to disable headroom reservation.",
@@ -111,7 +113,8 @@
           "entity_solax_rc_power_control": "Remote control power mode (select entity)",
           "entity_solax_rc_active_power": "Remote control active power setpoint (number entity)",
           "entity_solax_rc_autorepeat_duration": "Remote control autorepeat duration (number entity)",
-          "entity_solax_rc_trigger": "Remote control trigger (button entity)"
+          "entity_solax_rc_trigger": "Remote control trigger (button entity)",
+          "entity_solax_control_enable": "Solax control enable (optional binary helper)"
         },
         "data_description": {
           "entity_solax_soc": "E.g. sensor.solax_battery_capacity. Leave blank to disable Solax coordination.",
@@ -120,7 +123,8 @@
           "entity_solax_rc_power_control": "Select entity with 'Disabled' / 'Enabled Power Control' options. E.g. select.solax_remotecontrol_power_control",
           "entity_solax_rc_active_power": "Signed power setpoint in W. Solax convention: negative = discharge. E.g. number.solax_remotecontrol_active_power",
           "entity_solax_rc_autorepeat_duration": "Seconds the command stays active before the inverter reverts. E.g. number.solax_remotecontrol_autorepeat_duration",
-          "entity_solax_rc_trigger": "Button that activates the remote-control command. E.g. button.solax_remotecontrol_trigger_gen3"
+          "entity_solax_rc_trigger": "Button that activates the remote-control command. E.g. button.solax_remotecontrol_trigger_gen3",
+          "entity_solax_control_enable": "Boolean helper (input_boolean, switch or template binary_sensor). GridCoordinator controls the Solax (secondary) battery only while this is 'on'. Leave blank to always control Solax. When off, Solax is released to native self-consumption."
         }
       }
     },
@@ -215,6 +219,7 @@
           "entity_enabled": "Enable/disable gate",
           "entity_voltx_cmd": "Battery charge/discharge command",
           "entity_voltx_work_mode": "Inverter work mode",
+          "entity_voltx_control_enable": "Voltx control enable (optional binary helper)",
           "entity_ev_charger": "EV charger power sensor (optional)",
           "entity_ev_charge_current": "EV charge-current setpoint number entity (optional)",
           "entity_monitored_load_1": "Monitored load 1 power sensor (optional)",
@@ -232,6 +237,7 @@
           "entity_enabled": "When off, the coordinator is dormant.",
           "entity_voltx_cmd": "Positive = discharge (battery → AC). Written each tick.",
           "entity_voltx_work_mode": "Must support the 'Custom' option.",
+          "entity_voltx_control_enable": "Boolean helper (input_boolean, switch or template binary_sensor). GridCoordinator controls the Voltx (primary) battery only while this is 'on'. Leave blank to always control Voltx. When off, Voltx is released to native self-consumption and — if Solax control is on — Solax is promoted to sole grid tracker.",
           "entity_ev_charger": "Leave blank to disable EV charge awareness.",
           "entity_ev_charge_current": "EV charge-current setpoint (A); written only during emergency throttle. Leave blank to disable.",
           "entity_monitored_load_1": "Leave blank to disable headroom reservation.",
@@ -248,7 +254,8 @@
           "entity_solax_rc_power_control": "Remote control power mode (select entity)",
           "entity_solax_rc_active_power": "Remote control active power setpoint (number entity)",
           "entity_solax_rc_autorepeat_duration": "Remote control autorepeat duration (number entity)",
-          "entity_solax_rc_trigger": "Remote control trigger (button entity)"
+          "entity_solax_rc_trigger": "Remote control trigger (button entity)",
+          "entity_solax_control_enable": "Solax control enable (optional binary helper)"
         },
         "data_description": {
           "entity_solax_soc": "E.g. sensor.solax_battery_capacity. Leave blank to disable Solax coordination.",
@@ -257,7 +264,8 @@
           "entity_solax_rc_power_control": "Select entity: 'Disabled' / 'Enabled Power Control'.",
           "entity_solax_rc_active_power": "Signed power setpoint (negative = discharge in Solax convention).",
           "entity_solax_rc_autorepeat_duration": "Seconds the command stays active before the inverter reverts.",
-          "entity_solax_rc_trigger": "Button that activates the remote-control command."
+          "entity_solax_rc_trigger": "Button that activates the remote-control command.",
+          "entity_solax_control_enable": "Boolean helper (input_boolean, switch or template binary_sensor). GridCoordinator controls the Solax (secondary) battery only while this is 'on'. Leave blank to always control Solax. When off, Solax is released to native self-consumption."
         }
       }
     }
