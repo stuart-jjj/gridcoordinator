@@ -288,6 +288,35 @@ def compute_solax_share(
     return max(0.0, min(1.0, base_share + delta))
 
 
+def cap_combined_charge(
+    *,
+    mpc_batt_cmd: float,
+    grid_uncontrolled: float,
+    import_limit: float,
+    headroom_reserve: float,
+) -> float:
+    """Cap the combined (Voltx + Solax) battery charge so projected grid import stays
+    within (import_limit − headroom_reserve).
+
+    Applied to the shared EMHASS battery setpoint *before* the SOC-balance split so both
+    batteries scale their charging by the same factor — keeping them SOC-balanced — rather
+    than Voltx (computed first) consuming the whole reserve and starving Solax's share.
+    Use it while a headroom reserve is held for a sustained, known load (the EV): it turns
+    plain tier-1 tracking into "tracking at a lower effective import limit" for the pair.
+
+    Sign convention matches the rest of budget.py: charging is negative, discharging
+    positive.  Only charging is reduced — a discharge plan (mpc_batt_cmd > floor) passes
+    through unchanged, and if grid_uncontrolled (both batteries removed) already exceeds
+    the reduced ceiling the floor is positive, so the result forces a proportional
+    discharge that both batteries then share to defend the ceiling.
+
+    grid_uncontrolled is grid_actual with both batteries' current output added back
+    (grid_actual + prev_voltx_cmd + prev_solax_cmd).  Returns the capped combined command.
+    """
+    combined_charge_floor = grid_uncontrolled - (import_limit - headroom_reserve)
+    return max(mpc_batt_cmd, combined_charge_floor)
+
+
 def compute_solax_tier1(
     *,
     mpc_batt_cmd: float,
