@@ -389,14 +389,18 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         The helper is optional: when unconfigured (blank) control is ON by default.
         When configured, control is ON while the entity reads truthy (on/true/yes/1),
-        matching the grid-priority trigger parsing.  A configured-but-unavailable helper
-        defaults to ON (fail-safe: keep controlling) so a flaky helper never silently
-        strands a battery — the global enable gate remains the way to stop everything.
+        matching the grid-priority trigger parsing.  A configured helper that is missing
+        or not reporting (unavailable/unknown/empty) also defaults to ON (fail-safe: keep
+        controlling) so a flaky helper never silently strands a battery — the global enable
+        gate remains the way to stop everything.
         """
         entity = str(self._opt(key, "")).strip()
         if not entity:
             return True
-        return _str(hass, entity, "on").lower() in ("on", "true", "yes", "1")
+        state = _str(hass, entity, "on").strip().lower()
+        if state in ("unavailable", "unknown", ""):
+            return True
+        return state in ("on", "true", "yes", "1")
 
     # ── override control ──────────────────────────────────────────────────────
 
@@ -899,6 +903,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         hass = self.hass
 
         # Release Voltx and clear its ramp anchor so a clean ramp resumes if re-enabled.
+        # Capture its prior command first: grid_actual still reflects Voltx executing it, so
+        # the EV-throttle projection below must add it back to remove Voltx's contribution.
+        prev_voltx_cmd = self._prev_cmd
         await self._async_enter_self_consumption()
         self._prev_cmd = 0.0
 
@@ -963,8 +970,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_mode = SolaxMode.SELF_CONSUMPTION
             mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
 
-        # EV emergency throttle — grid-safety backstop; Voltx contributes 0 (released).
-        projected_grid = grid_actual + prev_solax_cmd - solax_cmd
+        # EV emergency throttle — grid-safety backstop.  grid_actual still includes Voltx's
+        # prior command, so add it back (removing Voltx's contribution now that it is
+        # released) and net out the Solax change, mirroring grid_after_voltx.  This keeps the
+        # projection conservative — it does not assume the released Voltx keeps holding down
+        # import — so the throttle cannot underestimate import after Voltx is dropped.
+        projected_grid = grid_actual + prev_voltx_cmd + prev_solax_cmd - solax_cmd
         ev_current_limit, ev_throttle_active = await self._async_ev_emergency_throttle(
             projected_grid, ev_active
         )
