@@ -5,6 +5,7 @@ import pytest
 from custom_components.grid_coordinator.budget import (
     SOLAX_RESIDUAL_MODES,
     build_coordinator_data,
+    cap_combined_charge,
     compute_ev_current_limit,
     compute_solax_command,
     compute_solax_share,
@@ -661,6 +662,48 @@ def test_solax_tier1_tier2_term_adds_to_share_term():
     cmd, mode = solax_t1(mpc_batt_cmd=-3000.0, grid_after_voltx=2000.0, tier2_term=200.0)
     assert cmd == -790.0
     assert mode == SolaxMode.FORCE_CHARGE
+
+
+# ── cap_combined_charge (EV proportional scale-back) ──────────────────────────
+
+_CAP = dict(
+    mpc_batt_cmd=0.0,
+    grid_uncontrolled=0.0,
+    import_limit=12000.0,
+    headroom_reserve=3000.0,
+)
+
+
+def cap(**overrides) -> float:
+    return cap_combined_charge(**{**_CAP, **overrides})
+
+
+def test_cap_combined_charge_passes_through_when_within_headroom():
+    """A combined charge that fits under the reduced ceiling is untouched."""
+    # reduced ceiling = 12000 - 3000 = 9000; uncontrolled 4000 leaves 5000 W to charge.
+    assert cap(mpc_batt_cmd=-4000.0, grid_uncontrolled=4000.0) == -4000.0
+
+
+def test_cap_combined_charge_reduces_when_over_headroom():
+    """A combined charge exceeding the headroom is capped to the reduced-ceiling floor.
+
+    Splitting this reduced total by the SOC-balance share then scales both batteries by
+    the same factor, so they stay balanced instead of Voltx grabbing the whole reserve.
+    """
+    # floor = 7000 - (12000 - 3000) = -2000 → charge limited to 2000 W combined.
+    assert cap(mpc_batt_cmd=-5000.0, grid_uncontrolled=7000.0) == -2000.0
+
+
+def test_cap_combined_charge_does_not_touch_discharge():
+    """A discharge plan is never reduced (only charging preserves the reserve)."""
+    assert cap(mpc_batt_cmd=2000.0, grid_uncontrolled=4000.0) == 2000.0
+
+
+def test_cap_combined_charge_forces_discharge_over_ceiling():
+    """When the both-batteries-removed grid already exceeds the reduced ceiling the floor
+    is positive, forcing a proportional discharge both batteries share to defend it."""
+    # floor = 10000 - 9000 = 1000 → even a charge plan is lifted to +1000 W discharge.
+    assert cap(mpc_batt_cmd=-3000.0, grid_uncontrolled=10000.0) == 1000.0
 
 
 # ── compute_ev_current_limit ──────────────────────────────────────────────────
