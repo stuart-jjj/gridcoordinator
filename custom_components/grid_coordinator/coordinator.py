@@ -570,14 +570,16 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # starving Solax's share.  This is plain emhass tracking (tier 2 stays off during
         # EV) at a lower effective import limit, applied to the pair as a unit.
         #
-        # Gated on the EV reserve dominating so the transient monitored-load reserve keeps
-        # its instant-full-headroom behaviour (Solax charge suppressed) unchanged.  Only
-        # reduces charging: a discharge plan is untouched; a discharge forced when the
+        # Gated on the EV reserve being *strictly* larger than the monitored-load reserve so
+        # that on a tie the transient monitored-load reserve wins and keeps its instant-full-
+        # headroom behaviour (Solax charge suppressed) unchanged — a coincident oven spike
+        # then still has the whole reserve free rather than a band Solax may be charging into.
+        # Only reduces charging: a discharge plan is untouched; a discharge forced when the
         # both-batteries-removed grid already exceeds the reduced ceiling is split
         # proportionally too (defending the ceiling with both batteries).  The per-inverter
         # grid-safety clamps in compute_voltx_command / compute_solax_tier1 remain the hard
         # backstop and stay self-consistent with this combined cap in steady state.
-        ev_dominant = ev_active and ev_reserve >= mon_load_reserve
+        ev_dominant = ev_active and ev_reserve > mon_load_reserve
         if ev_dominant:
             # grid with both batteries' current output added back (prev_cmd = Voltx).
             grid_uncontrolled = grid_actual + self._prev_cmd + self._solax_last_written_cmd
@@ -676,8 +678,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
 
         # Remap LOAD_HEADROOM to EV_CHARGING when the binding reserve was EV-caused
-        # (EV active and its reserve is the dominant one).
-        if ev_active and mode == CoordinatorMode.LOAD_HEADROOM and ev_reserve >= mon_load_reserve:
+        # (EV active and its reserve *strictly* dominates).  Must use the same strict
+        # comparison as ev_dominant above: EV_CHARGING is excluded from suppress_charge, so a
+        # tie must stay LOAD_HEADROOM to keep Solax charge suppressed for the oven reserve.
+        if ev_active and mode == CoordinatorMode.LOAD_HEADROOM and ev_reserve > mon_load_reserve:
             mode = CoordinatorMode.EV_CHARGING
 
         # ── write to Voltx ────────────────────────────────────────────────
