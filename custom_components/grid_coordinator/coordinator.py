@@ -14,6 +14,7 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 from .budget import (
     SOLAX_RESIDUAL_MODES,
     build_coordinator_data,
+    cap_combined_charge,
     compute_ev_current_limit,
     compute_solax_command,
     compute_solax_share,
@@ -562,6 +563,31 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         mon_load_reserve = self._headroom_reserve(hass)
         headroom_reserve = max(ev_reserve, mon_load_reserve)
 
+        # When the EV reserve is the operative one, scale the *combined* battery charge
+        # back to the headroom that remains under the reduced import ceiling BEFORE the
+        # SOC-balance split, so Voltx and Solax reduce by the same factor (staying SOC
+        # balanced) instead of Voltx — computed first — consuming the whole reserve and
+        # starving Solax's share.  This is plain emhass tracking (tier 2 stays off during
+        # EV) at a lower effective import limit, applied to the pair as a unit.
+        #
+        # Gated on the EV reserve dominating so the transient monitored-load reserve keeps
+        # its instant-full-headroom behaviour (Solax charge suppressed) unchanged.  Only
+        # reduces charging: a discharge plan is untouched; a discharge forced when the
+        # both-batteries-removed grid already exceeds the reduced ceiling is split
+        # proportionally too (defending the ceiling with both batteries).  The per-inverter
+        # grid-safety clamps in compute_voltx_command / compute_solax_tier1 remain the hard
+        # backstop and stay self-consistent with this combined cap in steady state.
+        ev_dominant = ev_active and ev_reserve >= mon_load_reserve
+        if ev_dominant:
+            # grid with both batteries' current output added back (prev_cmd = Voltx).
+            grid_uncontrolled = grid_actual + self._prev_cmd + self._solax_last_written_cmd
+            effective_mpc_batt = cap_combined_charge(
+                mpc_batt_cmd=effective_mpc_batt,
+                grid_uncontrolled=grid_uncontrolled,
+                import_limit=self._import_limit,
+                headroom_reserve=headroom_reserve,
+            )
+
         # ── compute Solax share (dynamic SOC-balance, both tiers) ─────────
         # Base share = solax_capacity / total_capacity — the fraction that makes both
         # batteries' SOC change at equal rate (dSOC/dt = power / rated_capacity_kWh).
@@ -705,16 +731,26 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 # Voltx in normal tracking (incl. holding a headroom ceiling): Solax executes
                 # its share of mpc_batt_cmd plus its share of the tier-2 grid correction
                 # (solax_tier2_term), clamped to protect the import headroom so it ramps down
-                # charging — and discharges if required — alongside Voltx.  When Voltx is
-                # already the one holding the ceiling, Solax yields its charging share (it is
-                # computed second) so the two batteries do not round-trip through each other.
-                ceiling_binding = mode in (
+                # charging — and discharges if required — alongside Voltx.
+                #
+                # suppress_charge (hard-zero Solax's charging share) is used only for a
+                # transient reserve (LOAD_HEADROOM / IMPORT_CEILING) where the point is to keep
+                # the *full* reserve instantly free for a sudden spike (oven), so Solax yields
+                # rather than fill the band Voltx is holding.  EV charging is deliberately
+                # excluded: it is a sustained, known load, and hard-suppressing Solax there
+                # made its charge flip on/off as grid crossed the ceiling (Solax stops → grid
+                # drops below ceiling → mode leaves EV_CHARGING → Solax charges → grid rises →
+                # repeat), an oscillation at the headroom threshold.  During EV, Solax instead
+                # relies on its own grid-safety clamp (cmd_floor) to scale charging down
+                # smoothly and fill only the headroom that remains under the reduced ceiling —
+                # the same continuous scale-back Voltx already does via cmd_floor with tier2
+                # off, i.e. plain emhass tracking at a lower effective import limit.
+                suppress_charge = mode in (
                     CoordinatorMode.LOAD_HEADROOM,
-                    CoordinatorMode.EV_CHARGING,
                     CoordinatorMode.IMPORT_CEILING,
                 )
                 solax_path = "tier1"
-                solax_suppress = ceiling_binding
+                solax_suppress = suppress_charge
                 solax_cmd, solax_mode = compute_solax_tier1(
                     mpc_batt_cmd=effective_mpc_batt,
                     share=effective_solax_share,
@@ -727,7 +763,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     import_limit=self._import_limit,
                     export_limit=self._export_limit,
                     headroom_reserve=headroom_reserve,
-                    suppress_charge=ceiling_binding,
+                    suppress_charge=suppress_charge,
                     prev_solax_cmd=self._solax_last_written_cmd,
                     tier2_term=solax_tier2_term,
                 )
