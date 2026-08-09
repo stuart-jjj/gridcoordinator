@@ -20,6 +20,7 @@ from .budget import (
     compute_solax_share,
     compute_solax_tier1,
     compute_voltx_command,
+    should_hold_self_consumption,
 )
 from .const import (
     CONF_ENTITY_ENABLED,
@@ -192,6 +193,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._override_power: float | None = None
         self._override_bypass_soc: bool = False
         self._override_expires: datetime | None = None
+        # Self-consumption deadband hysteresis state (see should_hold_self_consumption)
+        self._self_consumption_active: bool = False
         # Monitored load 1 — headroom reservation state
         self._mon_load_1_active: bool = False
         self._mon_load_1_below_since: datetime | None = None
@@ -542,9 +545,16 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # speed. prev_cmd is reset to 0 so the ramp starts clean on exit.
         # Both the grid target and battery setpoint are zeroed for a stale plan
         # so neither leaks into the controller if the deadband is ever set to 0.
+        # should_hold_self_consumption applies hysteresis once active (a wider exit
+        # threshold than entry) so an EMHASS value oscillating right at the deadband
+        # boundary at low overnight load can't flap the mode on every ~2-minute
+        # republish — see SELF_CONSUMPTION_EXIT_MARGIN's docstring in budget.py.
         effective_target = grid_target if not plan_is_stale else 0.0
         effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
-        if abs(effective_target) <= self._self_consumption_deadband and abs(effective_mpc_batt) <= self._self_consumption_deadband:
+        self._self_consumption_active = should_hold_self_consumption(
+            effective_target, effective_mpc_batt, self._self_consumption_deadband, self._self_consumption_active
+        )
+        if self._self_consumption_active:
             await self._async_enter_self_consumption()
             if self._solax_enabled() and self._solax_active:
                 await self._async_enter_solax_self_consumption()

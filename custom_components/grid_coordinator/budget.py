@@ -17,6 +17,29 @@ SOLAX_RESIDUAL_MODES = (
     CoordinatorMode.DISCHARGE_LIMIT,
 )
 
+# Added to self_consumption_deadband before *leaving* self-consumption once already
+# active (hysteresis). EMHASS setpoints hovering near the entry deadband at low
+# overnight load otherwise flap the coordinator between self_consumption and
+# emhass_tracking on every ~2-minute republish, toggling a real inverter work-mode
+# write each time (observed 2026-08-09, 00:08-08:42).
+SELF_CONSUMPTION_EXIT_MARGIN = 25
+
+
+def should_hold_self_consumption(
+    effective_target: float,
+    effective_mpc_batt: float,
+    deadband: float,
+    currently_active: bool,
+) -> bool:
+    """Decide whether the self-consumption deadband handoff should be active this tick.
+
+    Entry uses `deadband`; once active, exit requires both values to clear
+    `deadband + SELF_CONSUMPTION_EXIT_MARGIN` instead — see that constant's docstring
+    for why the plain single threshold flapped in production.
+    """
+    threshold = deadband + SELF_CONSUMPTION_EXIT_MARGIN if currently_active else deadband
+    return abs(effective_target) <= threshold and abs(effective_mpc_batt) <= threshold
+
 
 def compute_voltx_command(
     *,

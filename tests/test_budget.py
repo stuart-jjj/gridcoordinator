@@ -3,6 +3,7 @@
 import pytest
 
 from custom_components.grid_coordinator.budget import (
+    SELF_CONSUMPTION_EXIT_MARGIN,
     SOLAX_RESIDUAL_MODES,
     build_coordinator_data,
     cap_combined_charge,
@@ -11,6 +12,7 @@ from custom_components.grid_coordinator.budget import (
     compute_solax_share,
     compute_solax_tier1,
     compute_voltx_command,
+    should_hold_self_consumption,
 )
 from custom_components.grid_coordinator.models import CoordinatorData, CoordinatorMode, SolaxMode
 
@@ -925,3 +927,31 @@ def test_build_coordinator_data_headroom():
     assert data.export_headroom == pytest.approx(10000.0)  # 10000 - 0
     assert data.plan_age_minutes == 1.0
     assert data.override_mode is None
+
+
+# ── self-consumption deadband hysteresis ────────────────────────────────────────
+
+
+def test_self_consumption_enters_within_deadband():
+    assert should_hold_self_consumption(40.0, 40.0, deadband=50.0, currently_active=False)
+
+
+def test_self_consumption_does_not_enter_outside_deadband():
+    assert not should_hold_self_consumption(60.0, 0.0, deadband=50.0, currently_active=False)
+
+
+def test_self_consumption_stays_active_past_entry_deadband():
+    """Reproduces the 2026-08-09 Hermes report: an EMHASS value oscillating just
+    above/below the plain 50W deadband must not flap the mode every tick once
+    self-consumption is already active."""
+    assert should_hold_self_consumption(60.0, 0.0, deadband=50.0, currently_active=True)
+
+
+def test_self_consumption_exits_past_exit_margin():
+    over_exit = 50.0 + SELF_CONSUMPTION_EXIT_MARGIN + 1
+    assert not should_hold_self_consumption(over_exit, 0.0, deadband=50.0, currently_active=True)
+
+
+def test_self_consumption_exit_boundary_holds():
+    at_exit = 50.0 + SELF_CONSUMPTION_EXIT_MARGIN
+    assert should_hold_self_consumption(at_exit, 0.0, deadband=50.0, currently_active=True)
