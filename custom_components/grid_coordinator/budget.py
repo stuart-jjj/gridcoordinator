@@ -33,11 +33,18 @@ def should_hold_self_consumption(
 ) -> bool:
     """Decide whether the self-consumption deadband handoff should be active this tick.
 
-    Entry uses `deadband`; once active, exit requires both values to clear
-    `deadband + SELF_CONSUMPTION_EXIT_MARGIN` instead — see that constant's docstring
-    for why the plain single threshold flapped in production.
+    Entry uses `deadband`; once active, holding requires both values to stay within
+    `deadband + SELF_CONSUMPTION_EXIT_MARGIN` instead, so it exits as soon as either
+    one exceeds that wider threshold — see that constant's docstring for why the plain
+    single threshold flapped in production.
+
+    A deadband of exactly 0 is a documented way to disable the handoff (require an
+    exact 0W target), so the margin is not applied in that case — otherwise "active"
+    would start tolerating drift up to +-SELF_CONSUMPTION_EXIT_MARGIN once entered.
     """
-    threshold = deadband + SELF_CONSUMPTION_EXIT_MARGIN if currently_active else deadband
+    threshold = deadband
+    if currently_active and deadband > 0:
+        threshold += SELF_CONSUMPTION_EXIT_MARGIN
     return abs(effective_target) <= threshold and abs(effective_mpc_batt) <= threshold
 
 

@@ -955,3 +955,10 @@ def test_self_consumption_exits_past_exit_margin():
 def test_self_consumption_exit_boundary_holds():
     at_exit = 50.0 + SELF_CONSUMPTION_EXIT_MARGIN
     assert should_hold_self_consumption(at_exit, 0.0, deadband=50.0, currently_active=True)
+
+
+def test_self_consumption_zero_deadband_disables_hysteresis():
+    """deadband=0 is a documented way to disable the handoff entirely (config allows
+    it, min=0). The exit margin must not broaden that to +-25W once active."""
+    assert should_hold_self_consumption(0.0, 0.0, deadband=0.0, currently_active=True)
+    assert not should_hold_self_consumption(10.0, 0.0, deadband=0.0, currently_active=True)
