@@ -647,6 +647,22 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 solax_on=solax_on,
             )
 
+        # grid_priority's deadbeat formula (budget.py) tracks whatever target it's
+        # given with zero steady-state offset. The entity-driven trigger (e.g. a
+        # high-price template boolean) can fire while EMHASS's own grid_target is
+        # still positive — a planned import the LP solved for on a stale or
+        # otherwise-unrelated forecast — which would make deadbeat tracking chase
+        # that import instead of holding zero. Clamp so grid_priority only ever
+        # targets zero-or-export; a genuinely planned export target (negative)
+        # still passes through untouched. Computed here, before the Solax share
+        # split below, so both batteries' tier-2 terms use the same clamped target
+        # as the Voltx deadbeat command. The unclamped grid_target (not
+        # effective_target) is still what the diagnostic sensor reports, so this
+        # doesn't hide what EMHASS actually planned.
+        grid_priority = self._grid_priority_active(hass, effective_target)
+        if grid_priority:
+            effective_target = min(effective_target, 0.0)
+
         # ── compute Solax share (dynamic SOC-balance, both tiers) ─────────
         # Base share = solax_capacity / total_capacity — the fraction that makes both
         # batteries' SOC change at equal rate (dSOC/dt = power / rated_capacity_kWh).
@@ -696,8 +712,6 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # ── compute command (pure function, no HA calls) ───────────────────
         voltx_mpc_batt = effective_mpc_batt * (1.0 - effective_solax_share)
-
-        grid_priority = self._grid_priority_active(hass, effective_target)
 
         # While the EV charges, follow the EMHASS plan (tier 1) without chasing the grid
         # target (tier 2 off): the EV load is served by grid import, not by draining the
@@ -969,6 +983,13 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
             solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
             grid_priority = self._grid_priority_active(hass, effective_target)
+            # See the equivalent clamp in the Voltx-enabled path (async_update_data):
+            # the entity-driven trigger can fire while EMHASS's grid_target is still
+            # positive, and deadbeat tracking must never chase that into an import.
+            # Mutated in place (not a separate variable) so the tick log below —
+            # which reads effective_target — reflects the target actually tracked.
+            if grid_priority:
+                effective_target = min(effective_target, 0.0)
             # Tier 2 still off during EV (its load is served by grid import, not the battery).
             effective_tier2_gain = 0.0 if ev_active else self._tier2_gain
             solax_cmd, s_mode, _diag = compute_voltx_command(
