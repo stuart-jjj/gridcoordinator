@@ -986,12 +986,15 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # See the equivalent clamp in the Voltx-enabled path (async_update_data):
             # the entity-driven trigger can fire while EMHASS's grid_target is still
             # positive, and deadbeat tracking must never chase that into an import.
-            grid_priority_target = min(effective_target, 0.0) if grid_priority else effective_target
+            # Mutated in place (not a separate variable) so the tick log below —
+            # which reads effective_target — reflects the target actually tracked.
+            if grid_priority:
+                effective_target = min(effective_target, 0.0)
             # Tier 2 still off during EV (its load is served by grid import, not the battery).
             effective_tier2_gain = 0.0 if ev_active else self._tier2_gain
             solax_cmd, s_mode, _diag = compute_voltx_command(
                 grid_actual=grid_actual,
-                grid_target=grid_priority_target,
+                grid_target=effective_target,
                 mpc_batt_cmd=effective_mpc_batt,
                 prev_cmd=prev_solax_cmd,
                 soc=solax_soc,
