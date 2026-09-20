@@ -68,6 +68,7 @@ from .const import (
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
+    CONF_SC_DISCHARGE_HANDOFF,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOC_BALANCE_DEADBAND,
@@ -101,6 +102,7 @@ from .const import (
     DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
+    DEFAULT_SC_DISCHARGE_HANDOFF,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOC_BALANCE_DEADBAND,
@@ -290,6 +292,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @property
     def _self_consumption_deadband(self) -> float:
         return float(self._opt(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND))
+
+    @property
+    def _sc_discharge_handoff(self) -> bool:
+        return bool(self._opt(CONF_SC_DISCHARGE_HANDOFF, DEFAULT_SC_DISCHARGE_HANDOFF))
 
     @property
     def _tracking_deadband(self) -> float:
@@ -551,8 +557,14 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # republish — see SELF_CONSUMPTION_EXIT_MARGIN's docstring in budget.py.
         effective_target = grid_target if not plan_is_stale else 0.0
         effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
+        # The sc_discharge_handoff option lets a discharge setpoint (battery just covering
+        # the load at a ~0W target) through to native self-consumption; charging still blocks it.
         self._self_consumption_active = should_hold_self_consumption(
-            effective_target, effective_mpc_batt, self._self_consumption_deadband, self._self_consumption_active
+            effective_target,
+            effective_mpc_batt,
+            self._self_consumption_deadband,
+            self._self_consumption_active,
+            allow_discharge_plan=self._sc_discharge_handoff,
         )
         if self._self_consumption_active:
             await self._async_enter_self_consumption()

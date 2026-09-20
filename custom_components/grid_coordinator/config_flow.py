@@ -53,6 +53,7 @@ from .const import (
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
+    CONF_SC_DISCHARGE_HANDOFF,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOC_BALANCE_DEADBAND,
@@ -86,6 +87,7 @@ from .const import (
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
+    DEFAULT_SC_DISCHARGE_HANDOFF,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOC_BALANCE_DEADBAND,
@@ -144,6 +146,8 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=500, step=10, unit_of_measurement="W", mode=_NUM,
                 )),
+            vol.Required(CONF_SC_DISCHARGE_HANDOFF, default=defaults.get(CONF_SC_DISCHARGE_HANDOFF, DEFAULT_SC_DISCHARGE_HANDOFF)):
+                selector.BooleanSelector(),
             vol.Required(CONF_TRACKING_DEADBAND, default=defaults.get(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=1000, step=50, unit_of_measurement="W", mode=_NUM,
@@ -280,8 +284,7 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Optional(CONF_ENTITY_EV_CHARGER, default=defaults.get(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGE_CURRENT, default=defaults.get(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)): _TEXT,
             vol.Optional(CONF_ENTITY_MON_LOAD_1, default=defaults.get(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)): _TEXT,
-            vol.Optional(CONF_ENTITY_GRID_PRIORITY, default=defaults.get(CONF_ENTITY_GRID_PRIORITY, "")): _TEXT,
-        }
+            vol.Optional(CONF_ENTITY_GRID_PRIORITY, default=defaults.get(CONF_ENTITY_GRID_PRIORITY, "")): _TEXT,        }
     )
 
 
@@ -389,6 +392,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_MPC_BATT_SIGN_INVERTED: self._current(CONF_MPC_BATT_SIGN_INVERTED, DEFAULT_MPC_BATT_SIGN_INVERTED),
             CONF_SELF_CONSUMPTION_MODE: self._current(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE),
             CONF_SELF_CONSUMPTION_DEADBAND: self._current(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND),
+            CONF_SC_DISCHARGE_HANDOFF: self._current(CONF_SC_DISCHARGE_HANDOFF, DEFAULT_SC_DISCHARGE_HANDOFF),
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
             CONF_TIER2_GAIN: self._current(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN),
             CONF_GRID_PRIORITY_BAND: self._current(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND),
@@ -441,7 +445,6 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         entity_defaults[CONF_ENTITY_EV_CHARGE_CURRENT] = self._current(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)
         entity_defaults[CONF_ENTITY_MON_LOAD_1] = self._current(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)
         entity_defaults[CONF_ENTITY_GRID_PRIORITY] = self._current(CONF_ENTITY_GRID_PRIORITY, "")
-
         return self.async_show_form(
             step_id="entities",
             data_schema=_entities_schema(entity_defaults),
