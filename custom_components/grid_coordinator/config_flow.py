@@ -284,7 +284,8 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Optional(CONF_ENTITY_EV_CHARGER, default=defaults.get(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGE_CURRENT, default=defaults.get(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)): _TEXT,
             vol.Optional(CONF_ENTITY_MON_LOAD_1, default=defaults.get(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)): _TEXT,
-            vol.Optional(CONF_ENTITY_GRID_PRIORITY, default=defaults.get(CONF_ENTITY_GRID_PRIORITY, "")): _TEXT,        }
+            vol.Optional(CONF_ENTITY_GRID_PRIORITY, default=defaults.get(CONF_ENTITY_GRID_PRIORITY, "")): _TEXT,
+        }
     )
 
 
@@ -445,6 +446,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         entity_defaults[CONF_ENTITY_EV_CHARGE_CURRENT] = self._current(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)
         entity_defaults[CONF_ENTITY_MON_LOAD_1] = self._current(CONF_ENTITY_MON_LOAD_1, ENTITY_MON_LOAD_1)
         entity_defaults[CONF_ENTITY_GRID_PRIORITY] = self._current(CONF_ENTITY_GRID_PRIORITY, "")
+
         return self.async_show_form(
             step_id="entities",
             data_schema=_entities_schema(entity_defaults),

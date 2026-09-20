@@ -15,7 +15,9 @@ from custom_components.grid_coordinator.coordinator import GridCoordinator
 
 
 def _handoff(*, options: dict | None = None, data: dict | None = None) -> bool:
-    coordinator = SimpleNamespace(_entry=SimpleNamespace(options=options or {}, data=data or {}))
+    coordinator = SimpleNamespace(
+        _entry=SimpleNamespace(options=options or {}, data=data or {})
+    )
     coordinator._opt = MethodType(GridCoordinator._opt, coordinator)
     return GridCoordinator._sc_discharge_handoff.fget(coordinator)
 
@@ -34,8 +36,20 @@ def test_option_off():
 
 
 def test_options_override_entry_data():
-    assert _handoff(options={CONF_SC_DISCHARGE_HANDOFF: False}, data={CONF_SC_DISCHARGE_HANDOFF: True}) is False
-    assert _handoff(options={CONF_SC_DISCHARGE_HANDOFF: True}, data={CONF_SC_DISCHARGE_HANDOFF: False}) is True
+    assert (
+        _handoff(
+            options={CONF_SC_DISCHARGE_HANDOFF: False},
+            data={CONF_SC_DISCHARGE_HANDOFF: True},
+        )
+        is False
+    )
+    assert (
+        _handoff(
+            options={CONF_SC_DISCHARGE_HANDOFF: True},
+            data={CONF_SC_DISCHARGE_HANDOFF: False},
+        )
+        is True
+    )
 
 
 def test_falls_back_to_entry_data_when_no_option():
