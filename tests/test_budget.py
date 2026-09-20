@@ -962,3 +962,76 @@ def test_self_consumption_zero_deadband_disables_hysteresis():
     it, min=0). The exit margin must not broaden that to +-25W once active."""
     assert should_hold_self_consumption(0.0, 0.0, deadband=0.0, currently_active=True)
     assert not should_hold_self_consumption(10.0, 0.0, deadband=0.0, currently_active=True)
+
+
+# ── discharge-plan handoff (experimental, helper-gated) ─────────────────────────
+#
+# With grid_target ~ 0 and a *discharge* setpoint, EMHASS is only asking the battery
+# to cover the house load — exactly what native self-consumption does — so the
+# handoff is safe. A *charging* setpoint at target ~ 0 is solar-into-battery and must
+# keep blocking it (2026-06-10: native mode left the battery idle all day).
+
+
+def test_discharge_plan_blocks_handoff_by_default():
+    """Legacy behaviour is unchanged unless the experiment flag is passed."""
+    assert not should_hold_self_consumption(0.0, 800.0, deadband=200.0, currently_active=False)
+
+
+def test_discharge_plan_enters_handoff_when_allowed():
+    """The overnight case from the 24h analysis: target 0, battery covering load."""
+    assert should_hold_self_consumption(
+        0.0, 800.0, deadband=200.0, currently_active=False, allow_discharge_plan=True
+    )
+
+
+def test_large_discharge_plan_enters_handoff_when_allowed():
+    """Evening peak (>1kW) is not capped by the deadband — only charging is gated."""
+    assert should_hold_self_consumption(
+        0.0, 4500.0, deadband=200.0, currently_active=False, allow_discharge_plan=True
+    )
+
+
+def test_charge_plan_still_blocks_handoff_when_allowed():
+    """Solar-powered charging (target ~0, large negative setpoint) must stay in tracking."""
+    assert not should_hold_self_consumption(
+        0.0, -3200.0, deadband=200.0, currently_active=False, allow_discharge_plan=True
+    )
+
+
+def test_small_charge_plan_within_deadband_enters_handoff_when_allowed():
+    assert should_hold_self_consumption(
+        0.0, -150.0, deadband=200.0, currently_active=False, allow_discharge_plan=True
+    )
+
+
+def test_target_outside_deadband_blocks_handoff_even_with_discharge_plan():
+    """Grid target still gates entry: a non-zero target means EMHASS wants a real grid flow."""
+    assert not should_hold_self_consumption(
+        500.0, 800.0, deadband=200.0, currently_active=False, allow_discharge_plan=True
+    )
+    assert not should_hold_self_consumption(
+        -500.0, 800.0, deadband=200.0, currently_active=False, allow_discharge_plan=True
+    )
+
+
+def test_charge_side_hysteresis_applies_when_allowed():
+    """Once active, a small charge setpoint just past the entry deadband holds (no flap),
+    and exits past deadband + SELF_CONSUMPTION_EXIT_MARGIN — mirroring the plain rule."""
+    just_over_entry = -(200.0 + 10.0)
+    assert not should_hold_self_consumption(
+        0.0, just_over_entry, deadband=200.0, currently_active=False, allow_discharge_plan=True
+    )
+    assert should_hold_self_consumption(
+        0.0, just_over_entry, deadband=200.0, currently_active=True, allow_discharge_plan=True
+    )
+    over_exit = -(200.0 + SELF_CONSUMPTION_EXIT_MARGIN + 1)
+    assert not should_hold_self_consumption(
+        0.0, over_exit, deadband=200.0, currently_active=True, allow_discharge_plan=True
+    )
+
+
+def test_zero_deadband_charge_side_has_no_hysteresis_when_allowed():
+    """deadband=0 must still not gain a +-25W margin on the charge side once active."""
+    assert not should_hold_self_consumption(
+        0.0, -10.0, deadband=0.0, currently_active=True, allow_discharge_plan=True
+    )

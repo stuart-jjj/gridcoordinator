@@ -18,6 +18,7 @@ CONF_ENTITY_MPC_BATT_POWER = "entity_mpc_batt_power"
 CONF_TEST_MODE = "test_mode"
 CONF_SELF_CONSUMPTION_MODE = "self_consumption_mode"
 CONF_SELF_CONSUMPTION_DEADBAND = "self_consumption_deadband"
+CONF_SC_DISCHARGE_HANDOFF = "sc_discharge_handoff"
 CONF_TRACKING_DEADBAND = "tracking_deadband"
 CONF_TIER2_GAIN = "tier2_gain"
 CONF_GRID_PRIORITY_BAND = "grid_priority_band"
@@ -75,6 +76,7 @@ DEFAULT_MPC_SIGN_INVERTED = False   # positive = import (matches grid sensor con
 DEFAULT_MPC_BATT_SIGN_INVERTED = False  # positive = discharge (matches coordinator convention)
 DEFAULT_SELF_CONSUMPTION_MODE = "Self-consumption"  # Voltx Modbus work-mode name
 DEFAULT_SELF_CONSUMPTION_DEADBAND = 50  # W — |grid_target| below this → self-consumption
+DEFAULT_SC_DISCHARGE_HANDOFF = False    # experiment: a discharge setpoint at ~0W target no longer blocks the handoff
 DEFAULT_TRACKING_DEADBAND = 200         # W — hold command if grid error is within this band
 DEFAULT_TIER2_GAIN = 0.5                # fraction — damps tier-2 correction to prevent oscillation
 DEFAULT_GRID_PRIORITY_BAND = 0          # W — |grid_target| ≤ this → deadbeat grid tracking; 0 disables auto-trigger

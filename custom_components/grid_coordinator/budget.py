@@ -30,6 +30,7 @@ def should_hold_self_consumption(
     effective_mpc_batt: float,
     deadband: float,
     currently_active: bool,
+    allow_discharge_plan: bool = False,
 ) -> bool:
     """Decide whether the self-consumption deadband handoff should be active this tick.
 
@@ -41,11 +42,21 @@ def should_hold_self_consumption(
     A deadband of exactly 0 is a documented way to disable the handoff (require an
     exact 0W target), so the margin is not applied in that case — otherwise "active"
     would start tolerating drift up to +-SELF_CONSUMPTION_EXIT_MARGIN once entered.
+
+    `allow_discharge_plan` (experimental, helper-gated) stops a *discharge* setpoint
+    from blocking the handoff: at a ~0W grid target EMHASS is then only asking the
+    battery to cover the house load, which native self-consumption does anyway. Only
+    charging is still gated by the threshold — solar-into-battery plans (target ~0,
+    large negative setpoint) must stay under coordinator control, see e2132b2.
     """
     threshold = deadband
     if currently_active and deadband > 0:
         threshold += SELF_CONSUMPTION_EXIT_MARGIN
-    return abs(effective_target) <= threshold and abs(effective_mpc_batt) <= threshold
+    if abs(effective_target) > threshold:
+        return False
+    if allow_discharge_plan:
+        return effective_mpc_batt >= -threshold
+    return abs(effective_mpc_batt) <= threshold
 
 
 def compute_voltx_command(
