@@ -14,6 +14,7 @@ class SolaxMode(StrEnum):
     FORCE_DISCHARGE = "force_discharge"    # coordinator discharging to reduce import
     SOC_FLOOR = "soc_floor"               # discharge needed but Solax also at SOC floor
     SOC_CEILING = "soc_ceiling"           # charge needed but Solax also at SOC ceiling
+    FOLLOW_VOLTX = "follow_voltx"         # commanded as a share of Voltx's actual power during its native self-consumption handoff
 
 
 class CoordinatorMode(StrEnum):

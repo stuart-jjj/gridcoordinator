@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+# Run the real-Home-Assistant smoke tests in Docker.  See README.md in this directory.
+#
+#   scripts/ha_smoke/run                    # run everything
+#   SMOKE_IMAGE=python:3.14 scripts/ha_smoke/run   # use a plain Python 3.14 image
+#
+# The repo is mounted READ-ONLY and copied inside the container, so nothing in the
+# working tree (including the git-ignored config/ dev instance) is touched.
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+
+command -v docker >/dev/null || { echo "docker not found — start Docker Desktop" >&2; exit 2; }
+docker info >/dev/null 2>&1 || { echo "docker daemon not running — start Docker Desktop" >&2; exit 2; }
+
+VOLUME="${SMOKE_VENV_VOLUME:-gc-smoke-venv}"   # caches the venv (HA + test plugins) between runs
+IMAGE="${SMOKE_IMAGE:-$(docker images --format '{{.Repository}}:{{.Tag}}' \
+  | grep -E '^vsc-gridcoordinator-.*-features:latest$' | head -1 || true)}"
+IMAGE="${IMAGE:-python:3.14}"                  # needs Python >= 3.14 (see requirements.txt)
+
+echo "image: $IMAGE   venv volume: $VOLUME"
+docker volume create "$VOLUME" >/dev/null
+docker run --rm --entrypoint bash \
+  -v "$VOLUME":/venv \
+  -v "$PWD":/repo:ro \
+  "$IMAGE" /repo/scripts/ha_smoke/container.sh
