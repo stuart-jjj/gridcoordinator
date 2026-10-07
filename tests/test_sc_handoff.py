@@ -3,7 +3,6 @@
 import pytest
 
 from custom_components.grid_coordinator.budget import (
-    MAX_FOLLOW_SHARE,
     SELF_CONSUMPTION_EXIT_MARGIN,
     SHORTFALL_REENTRY_MULT,
     ScState,
@@ -150,6 +149,21 @@ def test_shortfall_exit_sets_longer_reentry_lockout():
     assert out.lockout_s == 120.0 * SHORTFALL_REENTRY_MULT
 
 
+def test_legacy_clause_exit_keeps_normal_lockout_when_tolerance_is_zero():
+    # tolerance 0 must reproduce legacy behaviour apart from the plain dwell (review Important 2).
+    entered = decide(now=1000.0, tolerance=0.0, setpoint=0.0, power=0.0)
+    out = decide(entered, now=2000.0, tolerance=0.0, setpoint=-800.0, power=-800.0)
+    assert out.active is False
+    assert out.lockout_s == 120.0
+
+
+def test_legacy_clause_exit_keeps_normal_lockout_when_power_unavailable():
+    entered = decide(now=1000.0, setpoint=10.0, power=None)
+    out = decide(entered, now=2000.0, setpoint=600.0, power=None)
+    assert out.active is False
+    assert out.lockout_s == 120.0
+
+
 def test_target_exit_keeps_normal_lockout():
     entered = decide(now=1000.0)
     out = decide(entered, now=2000.0, target=500.0)
@@ -176,15 +190,27 @@ FOLLOW = dict(
 )
 
 
-def test_follow_scales_voltx_power_by_share_ratio():
-    cmd, mode = compute_solax_follow(voltx_power=-1500.0, share=0.4, **FOLLOW)
-    assert cmd == pytest.approx(-1000.0)  # 1500 * 0.4 / 0.6
+def test_follow_takes_share_of_combined_battery_power():
+    # Voltx at -900 plus Solax already at -600 is -1500 combined; Solax's share is 0.4.
+    cmd, mode = compute_solax_follow(voltx_power=-900.0, share=0.4, **{**FOLLOW, "prev_solax_cmd": -600.0})
+    assert cmd == pytest.approx(-600.0)
     assert mode == SolaxMode.FOLLOW_VOLTX
+
+
+def test_follow_first_tick_takes_share_of_voltx_alone():
+    cmd, _ = compute_solax_follow(voltx_power=-1500.0, share=0.4, **FOLLOW)
+    assert cmd == pytest.approx(-600.0)
+
+
+def test_follow_share_above_half_is_still_a_fraction_of_the_total():
+    # share 0.7 must never produce more than the combined power (ratio s/(1-s) would be 2.33x).
+    cmd, _ = compute_solax_follow(voltx_power=-1000.0, share=0.7, **{**FOLLOW, "prev_solax_cmd": -1000.0})
+    assert cmd == pytest.approx(-1400.0)
 
 
 def test_follow_has_voltx_sign_discharge():
     cmd, mode = compute_solax_follow(voltx_power=900.0, share=0.5, **FOLLOW)
-    assert cmd == pytest.approx(900.0)
+    assert cmd == pytest.approx(450.0)
     assert mode == SolaxMode.FOLLOW_VOLTX
 
 
@@ -192,13 +218,8 @@ def test_follow_zero_when_voltx_idle():
     assert compute_solax_follow(voltx_power=0.0, share=0.4, **FOLLOW) == (0.0, SolaxMode.SELF_CONSUMPTION)
 
 
-def test_follow_share_capped_so_ratio_stays_finite():
-    cmd, _ = compute_solax_follow(voltx_power=-100.0, share=1.0, **FOLLOW)
-    assert cmd == pytest.approx(-100.0 * MAX_FOLLOW_SHARE / (1 - MAX_FOLLOW_SHARE))
-
-
 def test_follow_respects_inverter_charge_limit():
-    cmd, _ = compute_solax_follow(voltx_power=-5000.0, share=0.5, **FOLLOW)
+    cmd, _ = compute_solax_follow(voltx_power=-5000.0, share=0.8, **FOLLOW)  # raw -4000 W
     assert cmd == -3000.0
 
 

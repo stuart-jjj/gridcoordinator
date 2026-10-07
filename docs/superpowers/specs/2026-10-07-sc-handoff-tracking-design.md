@@ -94,7 +94,10 @@ transition).
 
 Shortfall back-off: when the handoff is left because a charging plan was
 undershot (target in band, battery clause failed), the next lockout is
-`5 x min_dwell_s` (`SHORTFALL_REENTRY_MULT`) instead of `min_dwell_s`. Found in
+`5 x min_dwell_s` (`SHORTFALL_REENTRY_MULT`) instead of `min_dwell_s`. It applies
+only when the battery-tracking clause was in effect (tolerance > 0 and the power
+reading available); a legacy-clause exit keeps the plain dwell, so `tolerance == 0`
+still reproduces today's behaviour. Found in
 the sim: tracking pins actual power to the setpoint, so the entry test is
 trivially satisfied there, and native mode then re-reveals the shortfall; without
 the back-off a persistent shortfall cycles every `2 x min_dwell_s`, toggling the
@@ -184,9 +187,14 @@ While the handoff is active and Solax is enabled and its control switch is on:
    sim the smoothed signal lagged a cloud cycle and left Solax charging against a
    collapsed surplus while Voltx discharged to compensate. Smoothing is used only
    for the handoff decision.
-2. Voltx is moving `(1 - s)` of the total battery power, so Solax's
-   target is `solax_target = raw_voltx_batt_power * s / (1 - s)`
-   (`s` is clamped below 1; if `s >= 1` use the maximum, see limits).
+2. Solax takes `s` of the **combined** battery power:
+   `solax_target = s * (raw_voltx_batt_power + last_written_solax_cmd)`
+   (`s` clamped to [0, 1]; the last written setpoint stands in for Solax's
+   actual power). An earlier ratio form `voltx_power * s / (1 - s)` was
+   rejected by the final review: native Voltx reacts to the grid, which includes
+   Solax, so that form has loop gain `s/(1-s)`, above 1 for `s > 0.5` (an SOC
+   imbalance of ~9 % is enough), and the batteries alternated in opposite
+   directions indefinitely. The combined-power form is stable for any `s`.
 3. Pass `solax_target` through the existing `compute_solax_tier1`
    (`mpc_batt_cmd=solax_target, share=1.0, tier2_term=0`) so the existing grid
    safety clamp, SOC floor/ceiling and Solax inverter limits all apply, then the
@@ -215,9 +223,11 @@ Properties this relies on, all to be checked in the sim:
   deliberately a function of Voltx's power, not of the grid error, so it cannot
   repeat the 2026-07-09 `grid_priority` freeze (Solax zeroing the error and
   freezing Voltx's loop). Native Voltx self-consumption still sees a grid error
-  after Solax acts and reduces its own power; the combined response converges
-  (`voltx = S/(1+k)`, `solax = k*S/(1+k)` for a surplus `S`, `k = s/(1-s)`). Solax acts a tick after Voltx moves, so a step
-  change in solar produces up to two ticks of opposition, then both settle.
+  after Solax acts and reduces its own power; the combined power settles at the
+  surplus `S`, so Solax gets `s*S` and Voltx `(1-s)*S` for any `s` in [0, 1].
+  Solax acts a tick after Voltx moves, so a step change in solar produces up to
+  two ticks of opposition, then both settle. The sim covers imbalanced SOCs
+  (60/30, 60/40, 70/25) at native firmware lag 0.7 and 1.0.
 - **Fallback.** If the Voltx power sensor is unavailable, fall back to today's
   release-to-idle behaviour. Solax must not be commanded from a stale value.
 - **Dwell.** Entering the handoff does not release-then-recommand Solax:

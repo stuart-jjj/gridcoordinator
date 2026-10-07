@@ -22,11 +22,13 @@ def _cloud(period_s: float, high: float = 3500.0, low: float = 800.0):
     return inputs
 
 
-@pytest.mark.parametrize("period_s", [40, 80, 160])
-def test_handoff_cuts_export_and_import_under_cloud_cycling(period_s):
+# At a 160 s period the 80 s cloud phase is long enough for the charging-shortfall exit (and
+# its 5 x dwell re-entry back-off) to apply, so the benefit is smaller by design.
+@pytest.mark.parametrize(("period_s", "max_export_ratio"), [(40, 0.5), (80, 0.5), (160, 0.75)])
+def test_handoff_cuts_export_and_import_under_cloud_cycling(period_s, max_export_ratio):
     base = run(LEGACY, _cloud(period_s), DURATION_S)
     new = run(NEW, _cloud(period_s), DURATION_S)
-    assert new.export_wh < 0.5 * base.export_wh
+    assert new.export_wh < max_export_ratio * base.export_wh
     assert new.import_wh <= base.import_wh  # no new grid import from the change
 
 
@@ -94,3 +96,20 @@ def test_idle_or_discharge_plan_never_exits_for_discharging_above_plan():
     res = run(NEW, inputs, 600)
     assert res.transitions <= 1  # at most the initial entry
     assert res.active_ticks >= res.ticks - 2
+
+
+@pytest.mark.parametrize("native_lag", [0.7, 1.0])
+@pytest.mark.parametrize(("voltx_soc", "solax_soc"), [(60.0, 30.0), (60.0, 40.0), (70.0, 25.0)])
+def test_solax_follow_is_stable_when_socs_are_imbalanced(monkeypatch, native_lag, voltx_soc, solax_soc):
+    # An SOC imbalance pushes Solax's share above 0.5; a ratio-of-Voltx follow formula then
+    # has loop gain > 1 against native Voltx and the two batteries alternate in opposite
+    # directions indefinitely (final review, Critical 1).
+    monkeypatch.setattr("tests.sim.plant.NATIVE_LAG", native_lag)
+
+    def inputs(t):
+        return LOAD_W, 2500.0, 0.0, -1247.0, None  # steady 2 kW surplus
+
+    res = run(NEW, inputs, 600, plant=make_plant(voltx_soc, solax_soc))
+    assert res.active_ticks > res.ticks * 0.9
+    assert res.max_opposing_run <= 3
+    assert all(abs(g) < 400 for g in res.grid[-10:])

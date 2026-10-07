@@ -127,7 +127,8 @@ def decide_self_consumption(
     if state.active and deadband > 0:
         threshold += SELF_CONSUMPTION_EXIT_MARGIN
     target_ok = abs(effective_target) <= threshold
-    if tolerance > 0 and smoothed_voltx_power is not None:
+    battery_clause_active = tolerance > 0 and smoothed_voltx_power is not None
+    if battery_clause_active:
         if voltx_setpoint >= 0:
             battery_ok = True
         else:
@@ -146,13 +147,16 @@ def decide_self_consumption(
     )
     if locked and not force_exit:
         return state
-    shortfall_exit = state.active and not want and target_ok and not battery_ok and not force_exit
+    shortfall_exit = (
+        battery_clause_active
+        and state.active
+        and not want
+        and target_ok
+        and not battery_ok
+        and not force_exit
+    )
     lockout = min_dwell_s * (SHORTFALL_REENTRY_MULT if shortfall_exit else 1)
     return ScState(active=want, last_transition_at=now, lockout_s=lockout)
-
-
-# Cap on Solax's share while following Voltx so s/(1-s) stays finite.
-MAX_FOLLOW_SHARE = 0.95
 
 
 def compute_solax_follow(
@@ -171,16 +175,21 @@ def compute_solax_follow(
 ) -> tuple[float, SolaxMode]:
     """Solax command while Voltx is in native self-consumption: follow Voltx's power.
 
-    Voltx moves (1 - share) of the combined battery power, so Solax moves
-    voltx_power * share / (1 - share), always with Voltx's sign (share >= 0) — it can
-    never oppose Voltx, and being a function of Voltx's power rather than of the grid
-    error it cannot repeat the 2026-07-09 grid_priority freeze.  The existing tier-1
-    clamps (grid safety, SOC floor/ceiling, inverter limits) are reused unchanged.
-    grid_actual already contains Voltx's native response; prev_solax_cmd is added back
-    inside compute_solax_tier1 to get the Solax-free baseline.
+    Solax takes `share` of the COMBINED battery power, share * (voltx_power +
+    prev_solax_cmd), always with Voltx's sign (share is clamped to [0, 1]) — it can
+    never oppose Voltx, and being a function of battery power rather than of the grid
+    error it cannot repeat the 2026-07-09 grid_priority freeze.  Native Voltx settles so
+    the combined power equals the surplus, hence Solax gets share * surplus for any
+    share.  (An earlier ratio-of-Voltx form, voltx_power * s / (1 - s), has loop gain
+    s/(1 - s) against native Voltx's own grid response: above 1 for s > 0.5, which an
+    SOC imbalance easily causes, so the two batteries alternated in opposite
+    directions indefinitely — final review, Critical 1.)  prev_solax_cmd, the last
+    written setpoint, stands in for Solax's actual power.  The existing tier-1 clamps
+    (grid safety, SOC floor/ceiling, inverter limits) are reused unchanged;
+    grid_actual already contains Voltx's native response.
     """
-    s = max(0.0, min(share, MAX_FOLLOW_SHARE))
-    target = voltx_power * s / (1.0 - s)
+    s = max(0.0, min(share, 1.0))
+    target = s * (voltx_power + prev_solax_cmd)
     cmd, mode = compute_solax_tier1(
         mpc_batt_cmd=target,
         share=1.0,
