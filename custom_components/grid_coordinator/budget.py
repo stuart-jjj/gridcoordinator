@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import math
+from dataclasses import dataclass
+
 from .models import CoordinatorData, CoordinatorMode, SolaxMode, VoltxDiag
 
 # Voltx modes that mean it has genuinely stopped moving (hard SOC/physical boundary),
@@ -57,6 +60,145 @@ def should_hold_self_consumption(
     if allow_discharge_plan:
         return effective_mpc_batt >= -threshold
     return abs(effective_mpc_batt) <= threshold
+
+
+@dataclass(frozen=True)
+class ScState:
+    """Self-consumption handoff state carried between ticks.
+
+    `last_transition_at` is a monotonic timestamp in seconds (None until the first
+    transition) so the minimum-dwell lockout survives across ticks.
+    """
+
+    active: bool = False
+    last_transition_at: float | None = None
+    lockout_s: float = 0.0  # lockout length measured from last_transition_at
+
+
+# After leaving the handoff because the battery fell short of a charging plan, hold
+# tracking this many times longer than the normal dwell before re-entering.  Tracking
+# pins actual power to the setpoint, so the entry test is trivially satisfied there and
+# native mode then re-reveals the shortfall — without a back-off that cycles every
+# 2 x dwell, toggling the inverter work mode (see the shortfall scenario in tests/sim).
+SHORTFALL_REENTRY_MULT = 5
+
+
+def ema_update(prev: float | None, sample: float, dt_s: float, tau_s: float) -> float:
+    """Time-constant EMA: alpha = 1 - exp(-dt/tau). Seeds on the first sample.
+
+    tau_s <= 0 disables smoothing (returns the raw sample), so a 0 option means
+    "off" rather than a divide-by-zero.
+    """
+    if prev is None or tau_s <= 0:
+        return sample
+    alpha = 1.0 - math.exp(-max(dt_s, 0.0) / tau_s)
+    return prev + alpha * (sample - prev)
+
+
+def decide_self_consumption(
+    *,
+    state: ScState,
+    now: float,
+    effective_target: float,
+    voltx_setpoint: float,
+    smoothed_voltx_power: float | None,
+    deadband: float,
+    tolerance: float,
+    min_dwell_s: float,
+    allow_discharge_plan: bool = False,
+    force_exit: bool = False,
+) -> ScState:
+    """Decide whether the Voltx native self-consumption handoff is active this tick.
+
+    Holds the handoff when |effective_target| is within the (hysteresis-widened)
+    deadband AND the battery clause passes.  The battery clause (tolerance > 0 and a
+    smoothed actual power available) applies only to a charging plan
+    (voltx_setpoint < 0): d = smoothed_voltx_power - voltx_setpoint must not exceed
+    `tolerance` (+ SELF_CONSUMPTION_EXIT_MARGIN once active), so a battery absorbing
+    MORE than planned never leaves the handoff.  For an idle/discharge plan the clause
+    always passes — at a ~0 W target native self-consumption covers the load, which is
+    what the plan wants.  With tolerance == 0, or no actual power, the legacy clause
+    from should_hold_self_consumption applies.
+
+    After any transition the state is locked for `min_dwell_s`; `force_exit` (safety
+    conditions: limit breach, control off) bypasses the lock and forces the handoff off.
+    """
+    threshold = deadband
+    if state.active and deadband > 0:
+        threshold += SELF_CONSUMPTION_EXIT_MARGIN
+    target_ok = abs(effective_target) <= threshold
+    if tolerance > 0 and smoothed_voltx_power is not None:
+        if voltx_setpoint >= 0:
+            battery_ok = True
+        else:
+            tol_eff = tolerance + (SELF_CONSUMPTION_EXIT_MARGIN if state.active else 0.0)
+            battery_ok = (smoothed_voltx_power - voltx_setpoint) <= tol_eff
+    elif allow_discharge_plan:
+        battery_ok = voltx_setpoint >= -threshold
+    else:
+        battery_ok = abs(voltx_setpoint) <= threshold
+    want = target_ok and battery_ok and not force_exit
+    if want == state.active:
+        return state
+    locked = (
+        state.last_transition_at is not None
+        and (now - state.last_transition_at) < state.lockout_s
+    )
+    if locked and not force_exit:
+        return state
+    shortfall_exit = state.active and not want and target_ok and not battery_ok and not force_exit
+    lockout = min_dwell_s * (SHORTFALL_REENTRY_MULT if shortfall_exit else 1)
+    return ScState(active=want, last_transition_at=now, lockout_s=lockout)
+
+
+# Cap on Solax's share while following Voltx so s/(1-s) stays finite.
+MAX_FOLLOW_SHARE = 0.95
+
+
+def compute_solax_follow(
+    *,
+    voltx_power: float,
+    share: float,
+    solax_soc: float,
+    solax_soc_min: float,
+    solax_soc_max: float,
+    solax_max_charge: float,
+    solax_max_discharge: float,
+    grid_actual: float,
+    import_limit: float,
+    export_limit: float,
+    prev_solax_cmd: float,
+) -> tuple[float, SolaxMode]:
+    """Solax command while Voltx is in native self-consumption: follow Voltx's power.
+
+    Voltx moves (1 - share) of the combined battery power, so Solax moves
+    voltx_power * share / (1 - share), always with Voltx's sign (share >= 0) — it can
+    never oppose Voltx, and being a function of Voltx's power rather than of the grid
+    error it cannot repeat the 2026-07-09 grid_priority freeze.  The existing tier-1
+    clamps (grid safety, SOC floor/ceiling, inverter limits) are reused unchanged.
+    grid_actual already contains Voltx's native response; prev_solax_cmd is added back
+    inside compute_solax_tier1 to get the Solax-free baseline.
+    """
+    s = max(0.0, min(share, MAX_FOLLOW_SHARE))
+    target = voltx_power * s / (1.0 - s)
+    cmd, mode = compute_solax_tier1(
+        mpc_batt_cmd=target,
+        share=1.0,
+        solax_soc=solax_soc,
+        solax_soc_min=solax_soc_min,
+        solax_soc_max=solax_soc_max,
+        solax_max_charge=solax_max_charge,
+        solax_max_discharge=solax_max_discharge,
+        grid_after_voltx=grid_actual,
+        import_limit=import_limit,
+        export_limit=export_limit,
+        prev_solax_cmd=prev_solax_cmd,
+    )
+    if mode in (SolaxMode.SOC_FLOOR, SolaxMode.SOC_CEILING):
+        return cmd, mode
+    if cmd != 0.0:
+        return cmd, SolaxMode.FOLLOW_VOLTX
+    return 0.0, SolaxMode.SELF_CONSUMPTION
 
 
 def compute_voltx_command(
