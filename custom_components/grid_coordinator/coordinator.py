@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -285,9 +286,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         if state is None or state.state in ("unavailable", "unknown", ""):
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
         except (ValueError, TypeError):
             return None
+        # float() accepts "nan"/"inf"; treat them as unreadable so they never reach the
+        # EMA, the share maths or a rounded Solax command.
+        return value if math.isfinite(value) else None
 
     def _update_voltx_power_ema(self, raw: float | None) -> float | None:
         """Update and return the smoothed Voltx power; reset (None) when unreadable.
@@ -744,6 +748,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             min_dwell_s=self._sc_min_dwell_seconds,
             allow_discharge_plan=self._sc_discharge_handoff,
             force_exit=limit_breach or not voltx_control,
+            bypass_lockout=plan_is_stale,
         )
         if self._sc_state.active != was_active:
             LOGGER.debug(

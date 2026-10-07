@@ -51,7 +51,7 @@ def test_read_voltx_power_numeric():
     assert _coord({POWER_ENTITY: "-2069"})._read_voltx_power() == -2069.0
 
 
-@pytest.mark.parametrize("state", ["unavailable", "unknown", "", "not-a-number"])
+@pytest.mark.parametrize("state", ["unavailable", "unknown", "", "not-a-number", "nan", "inf", "-inf"])
 def test_read_voltx_power_unreadable_is_none(state):
     assert _coord({POWER_ENTITY: state})._read_voltx_power() is None
 

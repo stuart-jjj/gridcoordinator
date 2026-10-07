@@ -1,5 +1,7 @@
 # Self-consumption handoff: battery tracking, flap suppression, Solax follow — Implementation Plan
 
+> **Revised 2026-10-07 after the final review and Copilot review (PR 36):** the Solax follow formula is share-of-combined-power (the ratio form `s/(1-s)` was unstable above share 0.5 and has been removed along with `MAX_FOLLOW_SHARE`); the 5x back-off applies only to the battery-tracking clause; `decide_self_consumption` has a `bypass_lockout` argument (stale plan); non-finite power readings are rejected. The code and tests embedded below are the as-built versions.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Hand off to the Voltx native self-consumption mode whenever `grid_target` is near 0 and the battery is not falling short of a charging plan, without flapping, and keep Solax (whose native mode does not work) following Voltx during the handoff.
@@ -58,9 +60,9 @@ Failure modes the spec implies that most need an explicit test, most likely firs
 - Produces (used by Tasks 2 and 4):
   - `ScState(active: bool = False, last_transition_at: float | None = None, lockout_s: float = 0.0)` frozen dataclass
   - `ema_update(prev: float | None, sample: float, dt_s: float, tau_s: float) -> float`
-  - `decide_self_consumption(*, state, now, effective_target, voltx_setpoint, smoothed_voltx_power, deadband, tolerance, min_dwell_s, allow_discharge_plan=False, force_exit=False) -> ScState`
+  - `decide_self_consumption(*, state, now, effective_target, voltx_setpoint, smoothed_voltx_power, deadband, tolerance, min_dwell_s, allow_discharge_plan=False, force_exit=False, bypass_lockout=False) -> ScState`
   - `compute_solax_follow(*, voltx_power, share, solax_soc, solax_soc_min, solax_soc_max, solax_max_charge, solax_max_discharge, grid_actual, import_limit, export_limit, prev_solax_cmd) -> tuple[float, SolaxMode]`
-  - constants `SHORTFALL_REENTRY_MULT = 5`, `MAX_FOLLOW_SHARE = 0.95`; `SolaxMode.FOLLOW_VOLTX == "follow_voltx"`
+  - constant `SHORTFALL_REENTRY_MULT = 5`; `SolaxMode.FOLLOW_VOLTX == "follow_voltx"`
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -72,7 +74,6 @@ Create `tests/test_sc_handoff.py` with exactly:
 import pytest
 
 from custom_components.grid_coordinator.budget import (
-    MAX_FOLLOW_SHARE,
     SELF_CONSUMPTION_EXIT_MARGIN,
     SHORTFALL_REENTRY_MULT,
     ScState,
@@ -219,11 +220,39 @@ def test_shortfall_exit_sets_longer_reentry_lockout():
     assert out.lockout_s == 120.0 * SHORTFALL_REENTRY_MULT
 
 
+def test_legacy_clause_exit_keeps_normal_lockout_when_tolerance_is_zero():
+    # tolerance 0 must reproduce legacy behaviour apart from the plain dwell (review Important 2).
+    entered = decide(now=1000.0, tolerance=0.0, setpoint=0.0, power=0.0)
+    out = decide(entered, now=2000.0, tolerance=0.0, setpoint=-800.0, power=-800.0)
+    assert out.active is False
+    assert out.lockout_s == 120.0
+
+
+def test_legacy_clause_exit_keeps_normal_lockout_when_power_unavailable():
+    entered = decide(now=1000.0, setpoint=10.0, power=None)
+    out = decide(entered, now=2000.0, setpoint=600.0, power=None)
+    assert out.active is False
+    assert out.lockout_s == 120.0
+
+
 def test_target_exit_keeps_normal_lockout():
     entered = decide(now=1000.0)
     out = decide(entered, now=2000.0, target=500.0)
     assert out.active is False
     assert out.lockout_s == 120.0
+
+
+def test_bypass_lockout_enters_inside_a_locked_exit():
+    # A stale plan zeroes target and setpoint; entering the handoff must not wait out a
+    # 5 x dwell shortfall back-off (Copilot review on PR 36; spec section 3).
+    locked = ScState(active=False, last_transition_at=1000.0, lockout_s=600.0)
+    assert decide(locked, now=1001.0).active is False
+    assert decide(locked, now=1001.0, bypass_lockout=True).active is True
+
+
+def test_bypass_lockout_does_not_force_an_entry_the_conditions_reject():
+    locked = ScState(active=False, last_transition_at=1000.0, lockout_s=600.0)
+    assert decide(locked, now=1001.0, target=500.0, bypass_lockout=True).active is False
 
 
 def test_force_exit_bypasses_dwell():
@@ -245,15 +274,27 @@ FOLLOW = dict(
 )
 
 
-def test_follow_scales_voltx_power_by_share_ratio():
-    cmd, mode = compute_solax_follow(voltx_power=-1500.0, share=0.4, **FOLLOW)
-    assert cmd == pytest.approx(-1000.0)  # 1500 * 0.4 / 0.6
+def test_follow_takes_share_of_combined_battery_power():
+    # Voltx at -900 plus Solax already at -600 is -1500 combined; Solax's share is 0.4.
+    cmd, mode = compute_solax_follow(voltx_power=-900.0, share=0.4, **{**FOLLOW, "prev_solax_cmd": -600.0})
+    assert cmd == pytest.approx(-600.0)
     assert mode == SolaxMode.FOLLOW_VOLTX
+
+
+def test_follow_first_tick_takes_share_of_voltx_alone():
+    cmd, _ = compute_solax_follow(voltx_power=-1500.0, share=0.4, **FOLLOW)
+    assert cmd == pytest.approx(-600.0)
+
+
+def test_follow_share_above_half_is_still_a_fraction_of_the_total():
+    # share 0.7 must never produce more than the combined power (ratio s/(1-s) would be 2.33x).
+    cmd, _ = compute_solax_follow(voltx_power=-1000.0, share=0.7, **{**FOLLOW, "prev_solax_cmd": -1000.0})
+    assert cmd == pytest.approx(-1400.0)
 
 
 def test_follow_has_voltx_sign_discharge():
     cmd, mode = compute_solax_follow(voltx_power=900.0, share=0.5, **FOLLOW)
-    assert cmd == pytest.approx(900.0)
+    assert cmd == pytest.approx(450.0)
     assert mode == SolaxMode.FOLLOW_VOLTX
 
 
@@ -261,13 +302,8 @@ def test_follow_zero_when_voltx_idle():
     assert compute_solax_follow(voltx_power=0.0, share=0.4, **FOLLOW) == (0.0, SolaxMode.SELF_CONSUMPTION)
 
 
-def test_follow_share_capped_so_ratio_stays_finite():
-    cmd, _ = compute_solax_follow(voltx_power=-100.0, share=1.0, **FOLLOW)
-    assert cmd == pytest.approx(-100.0 * MAX_FOLLOW_SHARE / (1 - MAX_FOLLOW_SHARE))
-
-
 def test_follow_respects_inverter_charge_limit():
-    cmd, _ = compute_solax_follow(voltx_power=-5000.0, share=0.5, **FOLLOW)
+    cmd, _ = compute_solax_follow(voltx_power=-5000.0, share=0.8, **FOLLOW)  # raw -4000 W
     assert cmd == -3000.0
 
 
@@ -292,7 +328,7 @@ def test_follow_grid_clamp_stops_charging_past_import_ceiling():
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `python3 -m pytest tests/test_sc_handoff.py -q`
-Expected: collection error `ImportError: cannot import name 'MAX_FOLLOW_SHARE' from 'custom_components.grid_coordinator.budget'`.
+Expected: collection error `ImportError: cannot import name 'SHORTFALL_REENTRY_MULT' from 'custom_components.grid_coordinator.budget'`.
 
 - [ ] **Step 3: Add the enum member**
 
@@ -363,6 +399,7 @@ def decide_self_consumption(
     min_dwell_s: float,
     allow_discharge_plan: bool = False,
     force_exit: bool = False,
+    bypass_lockout: bool = False,
 ) -> ScState:
     """Decide whether the Voltx native self-consumption handoff is active this tick.
 
@@ -378,12 +415,15 @@ def decide_self_consumption(
 
     After any transition the state is locked for `min_dwell_s`; `force_exit` (safety
     conditions: limit breach, control off) bypasses the lock and forces the handoff off.
+    `bypass_lockout` (a stale plan, which zeroes target and setpoint) lets the handoff
+    start or stop immediately whenever the conditions call for it, without forcing it.
     """
     threshold = deadband
     if state.active and deadband > 0:
         threshold += SELF_CONSUMPTION_EXIT_MARGIN
     target_ok = abs(effective_target) <= threshold
-    if tolerance > 0 and smoothed_voltx_power is not None:
+    battery_clause_active = tolerance > 0 and smoothed_voltx_power is not None
+    if battery_clause_active:
         if voltx_setpoint >= 0:
             battery_ok = True
         else:
@@ -400,15 +440,18 @@ def decide_self_consumption(
         state.last_transition_at is not None
         and (now - state.last_transition_at) < state.lockout_s
     )
-    if locked and not force_exit:
+    if locked and not (force_exit or bypass_lockout):
         return state
-    shortfall_exit = state.active and not want and target_ok and not battery_ok and not force_exit
+    shortfall_exit = (
+        battery_clause_active
+        and state.active
+        and not want
+        and target_ok
+        and not battery_ok
+        and not force_exit
+    )
     lockout = min_dwell_s * (SHORTFALL_REENTRY_MULT if shortfall_exit else 1)
     return ScState(active=want, last_transition_at=now, lockout_s=lockout)
-
-
-# Cap on Solax's share while following Voltx so s/(1-s) stays finite.
-MAX_FOLLOW_SHARE = 0.95
 
 
 def compute_solax_follow(
@@ -427,16 +470,21 @@ def compute_solax_follow(
 ) -> tuple[float, SolaxMode]:
     """Solax command while Voltx is in native self-consumption: follow Voltx's power.
 
-    Voltx moves (1 - share) of the combined battery power, so Solax moves
-    voltx_power * share / (1 - share), always with Voltx's sign (share >= 0) — it can
-    never oppose Voltx, and being a function of Voltx's power rather than of the grid
-    error it cannot repeat the 2026-07-09 grid_priority freeze.  The existing tier-1
-    clamps (grid safety, SOC floor/ceiling, inverter limits) are reused unchanged.
-    grid_actual already contains Voltx's native response; prev_solax_cmd is added back
-    inside compute_solax_tier1 to get the Solax-free baseline.
+    Solax takes `share` of the COMBINED battery power, share * (voltx_power +
+    prev_solax_cmd), always with Voltx's sign (share is clamped to [0, 1]) — it can
+    never oppose Voltx, and being a function of battery power rather than of the grid
+    error it cannot repeat the 2026-07-09 grid_priority freeze.  Native Voltx settles so
+    the combined power equals the surplus, hence Solax gets share * surplus for any
+    share.  (An earlier ratio-of-Voltx form, voltx_power * s / (1 - s), has loop gain
+    s/(1 - s) against native Voltx's own grid response: above 1 for s > 0.5, which an
+    SOC imbalance easily causes, so the two batteries alternated in opposite
+    directions indefinitely — final review, Critical 1.)  prev_solax_cmd, the last
+    written setpoint, stands in for Solax's actual power.  The existing tier-1 clamps
+    (grid safety, SOC floor/ceiling, inverter limits) are reused unchanged;
+    grid_actual already contains Voltx's native response.
     """
-    s = max(0.0, min(share, MAX_FOLLOW_SHARE))
-    target = voltx_power * s / (1.0 - s)
+    s = max(0.0, min(share, 1.0))
+    target = s * (voltx_power + prev_solax_cmd)
     cmd, mode = compute_solax_tier1(
         mpc_batt_cmd=target,
         share=1.0,
@@ -880,11 +928,13 @@ def _cloud(period_s: float, high: float = 3500.0, low: float = 800.0):
     return inputs
 
 
-@pytest.mark.parametrize("period_s", [40, 80, 160])
-def test_handoff_cuts_export_and_import_under_cloud_cycling(period_s):
+# At a 160 s period the 80 s cloud phase is long enough for the charging-shortfall exit (and
+# its 5 x dwell re-entry back-off) to apply, so the benefit is smaller by design.
+@pytest.mark.parametrize(("period_s", "max_export_ratio"), [(40, 0.5), (80, 0.5), (160, 0.75)])
+def test_handoff_cuts_export_and_import_under_cloud_cycling(period_s, max_export_ratio):
     base = run(LEGACY, _cloud(period_s), DURATION_S)
     new = run(NEW, _cloud(period_s), DURATION_S)
-    assert new.export_wh < 0.5 * base.export_wh
+    assert new.export_wh < max_export_ratio * base.export_wh
     assert new.import_wh <= base.import_wh  # no new grid import from the change
 
 
@@ -952,6 +1002,23 @@ def test_idle_or_discharge_plan_never_exits_for_discharging_above_plan():
     res = run(NEW, inputs, 600)
     assert res.transitions <= 1  # at most the initial entry
     assert res.active_ticks >= res.ticks - 2
+
+
+@pytest.mark.parametrize("native_lag", [0.7, 1.0])
+@pytest.mark.parametrize(("voltx_soc", "solax_soc"), [(60.0, 30.0), (60.0, 40.0), (70.0, 25.0)])
+def test_solax_follow_is_stable_when_socs_are_imbalanced(monkeypatch, native_lag, voltx_soc, solax_soc):
+    # An SOC imbalance pushes Solax's share above 0.5; a ratio-of-Voltx follow formula then
+    # has loop gain > 1 against native Voltx and the two batteries alternate in opposite
+    # directions indefinitely (final review, Critical 1).
+    monkeypatch.setattr("tests.sim.plant.NATIVE_LAG", native_lag)
+
+    def inputs(t):
+        return LOAD_W, 2500.0, 0.0, -1247.0, None  # steady 2 kW surplus
+
+    res = run(NEW, inputs, 600, plant=make_plant(voltx_soc, solax_soc))
+    assert res.active_ticks > res.ticks * 0.9
+    assert res.max_opposing_run <= 3
+    assert all(abs(g) < 400 for g in res.grid[-10:])
 ```
 
 - [ ] **Step 5: Confirm the baseline reproduces issue 1, then run everything**
@@ -1285,7 +1352,7 @@ def test_read_voltx_power_numeric():
     assert _coord({POWER_ENTITY: "-2069"})._read_voltx_power() == -2069.0
 
 
-@pytest.mark.parametrize("state", ["unavailable", "unknown", "", "not-a-number"])
+@pytest.mark.parametrize("state", ["unavailable", "unknown", "", "not-a-number", "nan", "inf", "-inf"])
 def test_read_voltx_power_unreadable_is_none(state):
     assert _coord({POWER_ENTITY: state})._read_voltx_power() is None
 
@@ -1390,7 +1457,7 @@ Expected: FAIL — `AttributeError: type object 'GridCoordinator' has no attribu
 
 In `coordinator.py`:
 
-1. After `import asyncio` add `import time`.
+1. After `import asyncio` add `import math` and `import time`.
 2. Replace the budget import block with:
 
 ```python
@@ -1440,9 +1507,12 @@ Insert immediately before `    @property` / `    def _import_limit(self) -> floa
         if state is None or state.state in ("unavailable", "unknown", ""):
             return None
         try:
-            return float(state.state)
+            value = float(state.state)
         except (ValueError, TypeError):
             return None
+        # float() accepts "nan"/"inf"; treat them as unreadable so they never reach the
+        # EMA, the share maths or a rounded Solax command.
+        return value if math.isfinite(value) else None
 
     def _update_voltx_power_ema(self, raw: float | None) -> float | None:
         """Update and return the smoothed Voltx power; reset (None) when unreadable.
@@ -1698,6 +1768,7 @@ Replace the block from `        effective_target = grid_target if not plan_is_st
             min_dwell_s=self._sc_min_dwell_seconds,
             allow_discharge_plan=self._sc_discharge_handoff,
             force_exit=limit_breach or not voltx_control,
+            bypass_lockout=plan_is_stale,
         )
         if self._sc_state.active != was_active:
             LOGGER.debug(
@@ -1744,7 +1815,7 @@ Replace the block from `        effective_target = grid_target if not plan_is_st
             )
 ```
 
-Also delete the two stale comment lines that described the old call (`# The sc_discharge_handoff option lets a discharge setpoint ...` / `# the load at a ~0W target) through...`) if they remain, and in the kept deadband comment block change `should_hold_self_consumption applies hysteresis once active` to `decide_self_consumption applies hysteresis once active`.
+Also delete the two stale comment lines that described the old call (`# The sc_discharge_handoff option lets a discharge setpoint ...` / `# the load at a ~0W target) through...`) if they remain; keep the explanatory deadband comment block above.
 
 - [ ] **Step 9: Verify**
 
@@ -1820,6 +1891,6 @@ The harness models the plant, not real Voltx firmware reaction time, Modbus late
 ## Self-Review
 
 - **Spec coverage:** decision rule, charge-only clause, hysteresis, dwell, bypass and legacy fallback → Task 1 and Task 4 steps 7–8; smoothing → Task 1 (`ema_update`) and Task 4; config table and entity → Task 3; diagnostics (d and handoff transitions in the debug log) → Task 4 step 8; Solax follow, `FOLLOW_VOLTX` and its reporting rules → Task 1 and Task 4; simulation harness, replay, cloud cycling, shortfall back-off, SOC ceiling and the no-follow baseline → Task 2; "what the harness cannot show" → Live soak.
-- **Spec details changed by the replay/sim findings** (the shortfall re-entry back-off, raw-power Solax follow, and the 2–3 tick opposition criterion) have been written back to the spec.
+- **Spec details changed by the replay/sim/review findings** (the shortfall re-entry back-off and its scope, raw-power share-of-combined Solax follow, the 2–3 tick opposition criterion, stale-plan lockout bypass) have been written back to the spec.
 - **Placeholder scan:** none; every code step carries its code.
 - **Type consistency:** `ScState`, `decide_self_consumption`, `compute_solax_follow` and `ema_update` signatures are identical across the Task 1 tests, the Task 2 driver and the Task 4 coordinator calls; `_solax_shares` returns a 5-tuple consistently in its definition, tests and both call sites.

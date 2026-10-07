@@ -140,7 +140,7 @@ These must never be delayed by the dwell. They already short-circuit before the
 self-consumption check, or must be made to:
 
 - manual override active
-- plan stale (existing STALE_PLAN path: `effective_target` and `effective_mpc_batt` are zeroed)
+- plan stale (existing STALE_PLAN path: `effective_target` and `effective_mpc_batt` are zeroed); implemented as `bypass_lockout=plan_is_stale` so a stale plan can enter or leave the handoff inside a lockout (incl. the 5x shortfall back-off) without forcing it
 - global `entity_enabled` gate off; per-battery control-enable helper off
 - import/export limit breach
 

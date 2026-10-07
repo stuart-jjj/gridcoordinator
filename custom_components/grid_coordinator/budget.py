@@ -107,6 +107,7 @@ def decide_self_consumption(
     min_dwell_s: float,
     allow_discharge_plan: bool = False,
     force_exit: bool = False,
+    bypass_lockout: bool = False,
 ) -> ScState:
     """Decide whether the Voltx native self-consumption handoff is active this tick.
 
@@ -122,6 +123,8 @@ def decide_self_consumption(
 
     After any transition the state is locked for `min_dwell_s`; `force_exit` (safety
     conditions: limit breach, control off) bypasses the lock and forces the handoff off.
+    `bypass_lockout` (a stale plan, which zeroes target and setpoint) lets the handoff
+    start or stop immediately whenever the conditions call for it, without forcing it.
     """
     threshold = deadband
     if state.active and deadband > 0:
@@ -145,7 +148,7 @@ def decide_self_consumption(
         state.last_transition_at is not None
         and (now - state.last_transition_at) < state.lockout_s
     )
-    if locked and not force_exit:
+    if locked and not (force_exit or bypass_lockout):
         return state
     shortfall_exit = (
         battery_clause_active

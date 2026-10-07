@@ -171,6 +171,19 @@ def test_target_exit_keeps_normal_lockout():
     assert out.lockout_s == 120.0
 
 
+def test_bypass_lockout_enters_inside_a_locked_exit():
+    # A stale plan zeroes target and setpoint; entering the handoff must not wait out a
+    # 5 x dwell shortfall back-off (Copilot review on PR 36; spec section 3).
+    locked = ScState(active=False, last_transition_at=1000.0, lockout_s=600.0)
+    assert decide(locked, now=1001.0).active is False
+    assert decide(locked, now=1001.0, bypass_lockout=True).active is True
+
+
+def test_bypass_lockout_does_not_force_an_entry_the_conditions_reject():
+    locked = ScState(active=False, last_transition_at=1000.0, lockout_s=600.0)
+    assert decide(locked, now=1001.0, target=500.0, bypass_lockout=True).active is False
+
+
 def test_force_exit_bypasses_dwell():
     entered = decide(now=1000.0)
     out = decide(entered, now=1001.0, force_exit=True)
