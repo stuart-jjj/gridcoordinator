@@ -129,28 +129,30 @@ async def test_charging_plan_on_plan_hands_off_to_native_self_consumption(hass):
     assert "Self-consumption" in options
 
 
-async def test_charging_shortfall_beyond_tolerance_stays_in_tracking(hass):
-    _, coordinator, _ = await _setup(hass, power="-300")  # plan -1247, only -300 happening
+async def test_charging_shortfall_stays_in_the_handoff(hass):
+    # Plan -1247 W but only -300 W is happening (a cloud): tracking would buy the shortfall
+    # from the grid, native self-consumption never imports to charge (live 2026-10-07 13:36).
+    _, coordinator, _ = await _setup(hass, power="-300")
     data = await _tick(hass, coordinator)
-    assert data.mode != CoordinatorMode.SELF_CONSUMPTION
-    assert coordinator._sc_state.active is False
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+    assert coordinator._sc_state.active is True
 
 
-async def test_unreadable_power_falls_back_to_legacy_clause(hass):
-    _, coordinator, _ = await _setup(hass, power="unavailable")
+@pytest.mark.parametrize("plan", [-1247.0, 0.0, 800.0])
+async def test_any_battery_plan_hands_off_at_zero_target(hass, plan):
+    _, coordinator, _ = await _setup(hass, mpc_batt=plan, power="1500")
     data = await _tick(hass, coordinator)
-    assert data.mode != CoordinatorMode.SELF_CONSUMPTION  # legacy: a charge setpoint blocks it
-    assert coordinator._voltx_power_ema is None
-    hass.states.async_set(D[CONF_ENTITY_MPC_BATT_POWER], "0")
-    data = await _tick(hass, coordinator)
-    assert data.mode == CoordinatorMode.SELF_CONSUMPTION  # legacy: idle plan is fine
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
 
 
-@pytest.mark.parametrize("bad", ["nan", "inf"])
-async def test_non_finite_power_is_treated_as_unreadable(hass, bad):
+@pytest.mark.parametrize("bad", ["unavailable", "nan", "inf"])
+async def test_unreadable_power_does_not_affect_the_handoff(hass, bad):
+    # The decision no longer needs the Voltx power; only the Solax follow does, and it
+    # falls back to releasing Solax.  Must not raise.
     _, coordinator, _ = await _setup(hass, power=bad)
-    await _tick(hass, coordinator)  # must not raise
-    assert coordinator._voltx_power_ema is None
+    data = await _tick(hass, coordinator)
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+    assert coordinator._read_voltx_power() is None
 
 
 async def test_import_limit_breach_exits_the_handoff_inside_the_dwell(hass):
@@ -213,11 +215,11 @@ async def test_stale_plan_hands_off_even_with_a_pending_lockout(hass):
 
     from custom_components.grid_coordinator.budget import ScState
 
-    _, coordinator, _ = await _setup(hass, power="-300")  # shortfall -> tracking
+    _, coordinator, _ = await _setup(hass, mpc_grid=-3000.0)  # planned export -> tracking
     await _tick(hass, coordinator)
     assert coordinator._sc_state.active is False
-    # pretend a shortfall exit just happened: 600 s re-entry lockout in force
-    coordinator._sc_state = ScState(active=False, last_transition_at=_time.monotonic(), lockout_s=600.0)
+    # pretend the handoff just ended: the 120 s dwell lockout is in force
+    coordinator._sc_state = ScState(active=False, last_transition_at=_time.monotonic())
     with patch("custom_components.grid_coordinator.coordinator._plan_age_minutes", return_value=45.0):
         data = await _tick(hass, coordinator)
     assert data.mode == CoordinatorMode.STALE_PLAN
@@ -233,13 +235,14 @@ async def test_options_flow_exposes_and_saves_the_new_options(hass):
     # the frontend serialises the schema; this fails if a selector/default is malformed
     fields = voluptuous_serialize.convert(result["data_schema"], custom_serializer=cv.custom_serializer)
     names = {f["name"] for f in fields}
-    assert {"sc_battery_tolerance", "sc_min_dwell_seconds", "sc_power_smoothing_seconds"} <= names
+    assert "sc_min_dwell_seconds" in names
+    # options removed in 2026.10.2 must not be offered any more
+    assert not ({"sc_battery_tolerance", "sc_discharge_handoff", "sc_power_smoothing_seconds"} & names)
     defaults = {f["name"]: f.get("default") for f in fields}
-    assert (defaults["sc_battery_tolerance"], defaults["sc_min_dwell_seconds"],
-            defaults["sc_power_smoothing_seconds"]) == (300, 120, 60)
+    assert defaults["sc_min_dwell_seconds"] == 120
 
     result = await hass.config_entries.options.async_configure(
-        result["flow_id"], {"sc_battery_tolerance": 450, "sc_min_dwell_seconds": 60, "sc_power_smoothing_seconds": 30}
+        result["flow_id"], {"sc_min_dwell_seconds": 60}
     )
     assert result["type"] == FlowResultType.FORM and result["step_id"] == "entities"
     fields = voluptuous_serialize.convert(result["data_schema"], custom_serializer=cv.custom_serializer)
@@ -251,7 +254,15 @@ async def test_options_flow_exposes_and_saves_the_new_options(hass):
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] == FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
-    assert entry.options["sc_battery_tolerance"] == 450
     assert entry.options["sc_min_dwell_seconds"] == 60
-    assert entry.options["sc_power_smoothing_seconds"] == 30
+    assert not ({"sc_battery_tolerance", "sc_discharge_handoff", "sc_power_smoothing_seconds"} & set(entry.options))
     assert entry.options["entity_voltx_battery_power"] == "sensor.voltx_battery_battery_power"
+
+
+async def test_entry_carrying_removed_option_keys_still_works(hass):
+    # An upgrade keeps whatever the old options flow stored; the removed keys are ignored.
+    stale = {"sc_battery_tolerance": 450, "sc_discharge_handoff": True, "sc_power_smoothing_seconds": 30}
+    entry, coordinator, _ = await _setup(hass, extra_data=stale)
+    assert entry.state.name == "LOADED"
+    data = await _tick(hass, coordinator)
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
