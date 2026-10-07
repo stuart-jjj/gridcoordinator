@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from statistics import pstdev
@@ -13,14 +14,17 @@ from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, Upda
 
 from .budget import (
     SOLAX_RESIDUAL_MODES,
+    ScState,
     build_coordinator_data,
     cap_combined_charge,
     compute_ev_current_limit,
     compute_solax_command,
+    compute_solax_follow,
     compute_solax_share,
     compute_solax_tier1,
     compute_voltx_command,
-    should_hold_self_consumption,
+    decide_self_consumption,
+    ema_update,
 )
 from .const import (
     CONF_ENTITY_ENABLED,
@@ -202,8 +206,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._override_power: float | None = None
         self._override_bypass_soc: bool = False
         self._override_expires: datetime | None = None
-        # Self-consumption deadband hysteresis state (see should_hold_self_consumption)
-        self._self_consumption_active: bool = False
+        # Self-consumption handoff state (see decide_self_consumption): active flag, last
+        # transition time and lockout length, plus the smoothed Voltx power it consumes.
+        self._sc_state = ScState()
+        self._voltx_power_ema: float | None = None
+        self._voltx_power_ema_at: float | None = None
         # Monitored load 1 — headroom reservation state
         self._mon_load_1_active: bool = False
         self._mon_load_1_below_since: datetime | None = None
@@ -271,6 +278,134 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     def _eid(self, key: str) -> str:
         """Return the configured entity ID for the given CONF_ENTITY_* key."""
         return self._opt(key, ENTITY_ID_DEFAULTS[key])
+
+    def _read_voltx_power(self) -> float | None:
+        """Raw Voltx battery power in W (+ = discharge), or None if unreadable."""
+        state = self.hass.states.get(self._eid(CONF_ENTITY_VOLTX_BATTERY_POWER))
+        if state is None or state.state in ("unavailable", "unknown", ""):
+            return None
+        try:
+            return float(state.state)
+        except (ValueError, TypeError):
+            return None
+
+    def _update_voltx_power_ema(self, raw: float | None) -> float | None:
+        """Update and return the smoothed Voltx power; reset (None) when unreadable.
+
+        Resetting on a bad reading means a stale average never drives the handoff
+        decision once the sensor recovers.
+        """
+        if raw is None:
+            self._voltx_power_ema = None
+            self._voltx_power_ema_at = None
+            return None
+        now = time.monotonic()
+        dt = 0.0 if self._voltx_power_ema_at is None else now - self._voltx_power_ema_at
+        self._voltx_power_ema = ema_update(
+            self._voltx_power_ema, raw, dt, self._sc_power_smoothing_seconds
+        )
+        self._voltx_power_ema_at = now
+        return self._voltx_power_ema
+
+    def _solax_shares(
+        self,
+        *,
+        solax_on: bool,
+        voltx_soc: float,
+        mpc_batt: float,
+        tier2_error: float,
+    ) -> tuple[float, float, float, float, float]:
+        """SOC-balance Solax shares for both tiers.
+
+        Returns (solax_soc, solax_share, solax_tier2_share, effective_solax_share,
+        effective_solax_tier2_share); the effective values are tapered to zero as
+        Solax approaches its SOC ceiling.  `mpc_batt` keys the tier-1 share's
+        direction, `tier2_error` the tier-2 share's.  Extracted unchanged from the
+        main tick so the handoff branch can size Voltx's setpoint the same way.
+        """
+        hass = self.hass
+        solax_soc = float("nan")
+        solax_share = 0.0
+        solax_tier2_share = 0.0
+        if solax_on:
+            solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
+            voltx_cap = _float(hass, self._eid(CONF_ENTITY_VOLTX_CAPACITY), 0.0)
+            solax_cap = _float(hass, self._eid(CONF_ENTITY_SOLAX_CAPACITY), 0.0)
+            if voltx_cap > 0 and solax_cap > 0:
+                solax_share = compute_solax_share(
+                    voltx_soc=voltx_soc,
+                    solax_soc=solax_soc,
+                    voltx_capacity_kwh=voltx_cap,
+                    solax_capacity_kwh=solax_cap,
+                    cmd=mpc_batt,
+                    sensitivity=self._soc_balance_sensitivity,
+                    soc_deadband=self._soc_balance_deadband,
+                )
+                solax_tier2_share = compute_solax_share(
+                    voltx_soc=voltx_soc,
+                    solax_soc=solax_soc,
+                    voltx_capacity_kwh=voltx_cap,
+                    solax_capacity_kwh=solax_cap,
+                    cmd=tier2_error,
+                    sensitivity=self._soc_balance_sensitivity,
+                    soc_deadband=self._soc_balance_deadband,
+                )
+        if solax_share > 0.0 or solax_tier2_share > 0.0:
+            _s_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
+            _taper = min(1.0, max(0.0, _s_soc_max - solax_soc) / DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND)
+        else:
+            _taper = 1.0
+        return (
+            solax_soc,
+            solax_share,
+            solax_tier2_share,
+            solax_share * _taper,
+            solax_tier2_share * _taper,
+        )
+
+    async def _async_solax_follow_voltx(
+        self,
+        *,
+        solax_on: bool,
+        voltx_power: float | None,
+        voltx_soc: float,
+        grid_actual: float,
+    ) -> tuple[float, SolaxMode]:
+        """Command Solax as a share of Voltx's actual power during the native handoff.
+
+        Solax's own native self-consumption mode does not work, so during the handoff
+        it must keep being commanded.  Uses the RAW Voltx reading (the smoothed one
+        lagged a cloud cycle and left Solax charging against a collapsed surplus).
+        Falls back to releasing it (the previous behaviour) when Solax control is off
+        or the Voltx power reading is unavailable — never command from a stale value.
+        """
+        if not solax_on or voltx_power is None:
+            if self._solax_enabled() and self._solax_active:
+                await self._async_enter_solax_self_consumption()
+            return 0.0, SolaxMode.SELF_CONSUMPTION
+        hass = self.hass
+        # Share is keyed off the direction Voltx is actually moving (not the plan).
+        solax_soc, _, _, share, _ = self._solax_shares(
+            solax_on=True, voltx_soc=voltx_soc, mpc_batt=voltx_power, tier2_error=0.0
+        )
+        solax_cmd, solax_mode = compute_solax_follow(
+            voltx_power=voltx_power,
+            share=share,
+            solax_soc=solax_soc,
+            solax_soc_min=_float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0),
+            solax_soc_max=_float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0),
+            solax_max_charge=float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE)),
+            solax_max_discharge=float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE)),
+            grid_actual=grid_actual,
+            import_limit=self._import_limit,
+            export_limit=self._export_limit,
+            prev_solax_cmd=self._solax_last_written_cmd,
+        )
+        solax_zero_deadband = float(self._opt(CONF_SOLAX_ZERO_DEADBAND, DEFAULT_SOLAX_ZERO_DEADBAND))
+        if solax_zero_deadband > 0 and abs(solax_cmd) <= solax_zero_deadband:
+            solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
+        await self._async_write_solax(solax_cmd)
+        return solax_cmd, solax_mode
 
     @property
     def _import_limit(self) -> float:
@@ -570,32 +705,76 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # speed. prev_cmd is reset to 0 so the ramp starts clean on exit.
         # Both the grid target and battery setpoint are zeroed for a stale plan
         # so neither leaks into the controller if the deadband is ever set to 0.
-        # should_hold_self_consumption applies hysteresis once active (a wider exit
+        # decide_self_consumption applies hysteresis once active (a wider exit
         # threshold than entry) so an EMHASS value oscillating right at the deadband
         # boundary at low overnight load can't flap the mode on every ~2-minute
         # republish — see SELF_CONSUMPTION_EXIT_MARGIN's docstring in budget.py.
         effective_target = grid_target if not plan_is_stale else 0.0
         effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
-        # The sc_discharge_handoff option lets a discharge setpoint (battery just covering
-        # the load at a ~0W target) through to native self-consumption; charging still blocks it.
-        self._self_consumption_active = should_hold_self_consumption(
-            effective_target,
-            effective_mpc_batt,
-            self._self_consumption_deadband,
-            self._self_consumption_active,
-            allow_discharge_plan=self._sc_discharge_handoff,
+
+        # Inputs the handoff decision needs, read before it (they used to be read later).
+        voltx_control = self._control_enabled(hass, CONF_ENTITY_VOLTX_CONTROL_ENABLE)
+        solax_on = self._solax_enabled() and self._control_enabled(
+            hass, CONF_ENTITY_SOLAX_CONTROL_ENABLE
         )
-        if self._self_consumption_active:
+        soc = _float(hass, entity_soc, 50.0)
+        voltx_power_raw = self._read_voltx_power()
+        voltx_power_smoothed = self._update_voltx_power_ema(voltx_power_raw)
+        # The battery clause compares Voltx's actual power with Voltx's OWN setpoint,
+        # i.e. the plan after Solax's SOC-balance share is taken off.
+        _, _, _, sc_solax_share, _ = self._solax_shares(
+            solax_on=solax_on,
+            voltx_soc=soc,
+            mpc_batt=effective_mpc_batt,
+            tier2_error=grid_track - effective_target,
+        )
+        voltx_setpoint = effective_mpc_batt * (1.0 - sc_solax_share)
+        # Safety conditions bypass the dwell: a limit breach or Voltx control switched off
+        # must leave the handoff immediately (the handoff branch has no grid clamp).
+        limit_breach = grid_actual > self._import_limit or grid_actual < -self._export_limit
+        was_active = self._sc_state.active
+        self._sc_state = decide_self_consumption(
+            state=self._sc_state,
+            now=time.monotonic(),
+            effective_target=effective_target,
+            voltx_setpoint=voltx_setpoint,
+            smoothed_voltx_power=voltx_power_smoothed,
+            deadband=self._self_consumption_deadband,
+            tolerance=self._sc_battery_tolerance,
+            min_dwell_s=self._sc_min_dwell_seconds,
+            allow_discharge_plan=self._sc_discharge_handoff,
+            force_exit=limit_breach or not voltx_control,
+        )
+        if self._sc_state.active != was_active:
+            LOGGER.debug(
+                "self-consumption handoff %s (target=%.0fW setpoint=%.0fW power=%s smoothed=%s)",
+                "ON" if self._sc_state.active else "OFF",
+                effective_target,
+                voltx_setpoint,
+                voltx_power_raw,
+                None if voltx_power_smoothed is None else round(voltx_power_smoothed),
+            )
+        if self._sc_state.active:
             await self._async_enter_self_consumption()
-            if self._solax_enabled() and self._solax_active:
-                await self._async_enter_solax_self_consumption()
+            # Solax's native mode does not work: keep commanding it as a share of Voltx.
+            solax_cmd, solax_mode = await self._async_solax_follow_voltx(
+                solax_on=solax_on,
+                voltx_power=voltx_power_raw,
+                voltx_soc=soc,
+                grid_actual=grid_actual,
+            )
             await self._async_release_ev_throttle()
             self._prev_cmd = 0.0
             sc_mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
             LOGGER.debug(
                 "tick | grid=%.0fW (age=%.0fs) target=%.0fW mpc_batt=%.0fW mode=%s "
-                "plan_age=%.1fmin (self-consumption)",
+                "plan_age=%.1fmin (self-consumption) | voltx_setpoint=%.0fW power=%s "
+                "smoothed=%s d=%s solax cmd=%.0fW mode=%s",
                 grid_actual, grid_age_s, grid_target, mpc_batt_cmd, sc_mode, plan_age,
+                voltx_setpoint, voltx_power_raw,
+                None if voltx_power_smoothed is None else round(voltx_power_smoothed),
+                None if voltx_power_smoothed is None else round(voltx_power_smoothed - voltx_setpoint),
+                solax_cmd, solax_mode,
             )
             return build_coordinator_data(
                 mode=sc_mode,
@@ -606,10 +785,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 export_limit=self._export_limit,
                 plan_age_minutes=plan_age,
                 override_mode=None,
+                solax_command=solax_cmd,
+                solax_mode=solax_mode,
             )
 
         # ── read battery / inverter state ──────────────────────────────────
-        soc = _float(hass, entity_soc, 50.0)
         soc_min = _float(hass, entity_soc_min, 20.0)
         soc_max = _float(hass, entity_soc_max, 95.0)
         max_charge = _float(hass, entity_max_charge, 5000.0)
@@ -652,13 +832,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
 
         # ── per-battery control switches ───────────────────────────────────
-        # Each battery's control can be turned off with an optional binary helper
-        # (blank helper → control on by default).  A battery whose control is off is
-        # released to native self-consumption and never commanded this tick.
-        voltx_control = self._control_enabled(hass, CONF_ENTITY_VOLTX_CONTROL_ENABLE)
-        solax_on = self._solax_enabled() and self._control_enabled(
-            hass, CONF_ENTITY_SOLAX_CONTROL_ENABLE
-        )
+        # voltx_control / solax_on are read above, before the self-consumption decision.
+        # A battery whose control is off is released to native self-consumption and never
+        # commanded this tick.
         if not voltx_control:
             # Voltx (primary) control off: release it and, if Solax control is on, promote
             # Solax to sole grid tracker running the full 2-tier controller on its own params.
@@ -707,39 +883,18 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # (see project_unplanned_load_tier_split memory).
         # Taper both shares to zero as Solax SOC approaches its ceiling so Voltx absorbs
         # the full charge command when Solax is full.
-        solax_soc = float("nan")
-        solax_share = 0.0
-        solax_tier2_share = 0.0
-        if solax_on:
-            solax_soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 50.0)
-            voltx_cap = _float(hass, self._eid(CONF_ENTITY_VOLTX_CAPACITY), 0.0)
-            solax_cap = _float(hass, self._eid(CONF_ENTITY_SOLAX_CAPACITY), 0.0)
-            if voltx_cap > 0 and solax_cap > 0:
-                solax_share = compute_solax_share(
-                    voltx_soc=soc,
-                    solax_soc=solax_soc,
-                    voltx_capacity_kwh=voltx_cap,
-                    solax_capacity_kwh=solax_cap,
-                    cmd=effective_mpc_batt,
-                    sensitivity=self._soc_balance_sensitivity,
-                    soc_deadband=self._soc_balance_deadband,
-                )
-                solax_tier2_share = compute_solax_share(
-                    voltx_soc=soc,
-                    solax_soc=solax_soc,
-                    voltx_capacity_kwh=voltx_cap,
-                    solax_capacity_kwh=solax_cap,
-                    cmd=grid_track - effective_target,
-                    sensitivity=self._soc_balance_sensitivity,
-                    soc_deadband=self._soc_balance_deadband,
-                )
-        if solax_share > 0.0 or solax_tier2_share > 0.0:
-            _s_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
-            _taper = min(1.0, max(0.0, _s_soc_max - solax_soc) / DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND)
-        else:
-            _taper = 1.0
-        effective_solax_share = solax_share * _taper
-        effective_solax_tier2_share = solax_tier2_share * _taper
+        (
+            solax_soc,
+            solax_share,
+            solax_tier2_share,
+            effective_solax_share,
+            effective_solax_tier2_share,
+        ) = self._solax_shares(
+            solax_on=solax_on,
+            voltx_soc=soc,
+            mpc_batt=effective_mpc_batt,
+            tier2_error=grid_track - effective_target,
+        )
 
         # ── compute command (pure function, no HA calls) ───────────────────
         voltx_mpc_batt = effective_mpc_batt * (1.0 - effective_solax_share)
