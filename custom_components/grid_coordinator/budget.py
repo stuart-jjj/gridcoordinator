@@ -34,7 +34,12 @@ def should_hold_self_consumption(
     currently_active: bool,
     allow_discharge_plan: bool = False,
 ) -> bool:
-    """Decide whether the self-consumption deadband handoff should be active this tick.
+    """LEGACY (pre-2026.10.1) handoff rule — no longer used by the coordinator.
+
+    Kept only as the closed-loop sim's baseline policy (tests/sim) and for its unit tests; the
+    live decision is `decide_self_consumption`, which looks at the grid target only.
+
+    Decide whether the self-consumption deadband handoff should be active this tick.
 
     Entry uses `deadband`; once active, holding requires both values to stay within
     `deadband + SELF_CONSUMPTION_EXIT_MARGIN` instead, so it exits as soon as either

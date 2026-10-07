@@ -22,13 +22,11 @@ def _cloud(period_s: float, high: float = 3500.0, low: float = 800.0):
     return inputs
 
 
-# At a 160 s period the 80 s cloud phase is long enough for the charging-shortfall exit (and
-# its 5 x dwell re-entry back-off) to apply, so the benefit is smaller by design.
-@pytest.mark.parametrize(("period_s", "max_export_ratio"), [(40, 0.5), (80, 0.5), (160, 0.75)])
-def test_handoff_cuts_export_and_import_under_cloud_cycling(period_s, max_export_ratio):
+@pytest.mark.parametrize("period_s", [40, 80, 160])
+def test_handoff_cuts_export_and_import_under_cloud_cycling(period_s):
     base = run(LEGACY, _cloud(period_s), DURATION_S)
     new = run(NEW, _cloud(period_s), DURATION_S)
-    assert new.export_wh < max_export_ratio * base.export_wh
+    assert new.export_wh < 0.5 * base.export_wh
     assert new.import_wh <= base.import_wh  # no new grid import from the change
 
 
@@ -68,7 +66,8 @@ def test_persistent_charging_shortfall_stays_in_the_handoff():
     res = run(NEW, inputs, 1800)
     assert res.transitions == 0
     assert res.active_ticks >= res.ticks - 2
-    assert res.import_wh < 0.25 * base.import_wh
+    assert res.import_wh < 5.0  # native self-consumption never buys the shortfall (legacy: ~318 Wh)
+    assert res.import_wh < 0.05 * base.import_wh
 
 
 def test_idle_or_discharge_plan_never_exits_for_discharging_above_plan():

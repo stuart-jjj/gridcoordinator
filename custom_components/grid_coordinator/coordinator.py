@@ -281,7 +281,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except (ValueError, TypeError):
             return None
         # float() accepts "nan"/"inf"; treat them as unreadable so they never reach the
-        # EMA, the share maths or a rounded Solax command.
+        # Solax share maths or a rounded Solax command.
         return value if math.isfinite(value) else None
 
     def _solax_shares(
@@ -298,7 +298,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         effective_solax_tier2_share); the effective values are tapered to zero as
         Solax approaches its SOC ceiling.  `mpc_batt` keys the tier-1 share's
         direction, `tier2_error` the tier-2 share's.  Extracted unchanged from the
-        main tick so the handoff branch can size Voltx's setpoint the same way.
+        main tick so the Solax follow can reuse the same share and ceiling taper.
         """
         hass = self.hass
         solax_soc = float("nan")
@@ -684,8 +684,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         )
         soc = _float(hass, entity_soc, 50.0)
         voltx_power_raw = self._read_voltx_power()
-        # Safety conditions bypass the dwell: a limit breach or Voltx control switched off
-        # must leave the handoff immediately (the handoff branch has no grid clamp).
+        # EMHASS does not know about the (externally controlled) EV.  While it charges, the
+        # EV must be served from the grid with tier 2 off — native self-consumption would
+        # drain the battery(ies) into the car — so EV charging keeps the handoff off.
+        ev_reserve, ev_active = self._ev_headroom_reserve(hass)
+        # Safety conditions bypass the dwell: a limit breach, Voltx control switched off or an
+        # EV charging must leave the handoff immediately (the branch has no grid clamp).
         limit_breach = grid_actual > self._import_limit or grid_actual < -self._export_limit
         was_active = self._sc_state.active
         self._sc_state = decide_self_consumption(
@@ -694,7 +698,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             effective_target=effective_target,
             deadband=self._self_consumption_deadband,
             min_dwell_s=self._sc_min_dwell_seconds,
-            force_exit=limit_breach or not voltx_control,
+            force_exit=limit_breach or not voltx_control or ev_active,
             bypass_lockout=plan_is_stale,
         )
         if self._sc_state.active != was_active:
@@ -747,7 +751,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # limit.  Take the larger reserve when both are active (protects the worst
         # case without double-counting).  ev_active is tracked separately so the mode
         # can be reported as ev_charging when the EV reserve is the binding one.
-        ev_reserve, ev_active = self._ev_headroom_reserve(hass)
+        # (ev_reserve / ev_active were read above, before the self-consumption decision.)
         mon_load_reserve = self._headroom_reserve(hass)
         headroom_reserve = max(ev_reserve, mon_load_reserve)
 

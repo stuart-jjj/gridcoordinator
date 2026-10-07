@@ -1,7 +1,7 @@
 """Closed-loop tick driver: runs the pure controller functions the way
 coordinator.py's _async_update_data orders them, against sim/plant.py.
 
-Only the parts the self-consumption handoff touches are reproduced (EMA, Solax share
+Only the parts the self-consumption handoff touches are reproduced (Solax share
 split, handoff decision, Voltx tracking command, Solax tier-1 / follow command).  The
 decision and command maths are the real functions from budget.py, so a change there
 is exercised here; the *ordering* below mirrors the coordinator and must be kept in

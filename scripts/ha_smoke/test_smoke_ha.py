@@ -43,6 +43,7 @@ from custom_components.grid_coordinator.const import (
     CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_SELF_CONSUMPTION_DEADBAND,
     DOMAIN,
+    ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS as D,
 )
 from custom_components.grid_coordinator.models import CoordinatorMode, SolaxMode
@@ -56,7 +57,7 @@ def _enable_custom(enable_custom_integrations):
 
 
 def _seed(hass: HomeAssistant, *, grid=0.0, mpc_grid=0.0, mpc_batt=-1247.0, power="-1200",
-          voltx_soc=50.0, solax=False):
+          voltx_soc=50.0, solax=False, ev_power=None):
     s = hass.states.async_set
     s(D[CONF_ENTITY_GRID_POWER], str(grid))
     s(D[CONF_ENTITY_ENABLED], "on")
@@ -71,6 +72,8 @@ def _seed(hass: HomeAssistant, *, grid=0.0, mpc_grid=0.0, mpc_batt=-1247.0, powe
     s(D[CONF_ENTITY_VOLTX_WORK_MODE], "Custom")
     s(D[CONF_ENTITY_VOLTX_BATTERY_POWER], power)
     s(D[CONF_ENTITY_VOLTX_CAPACITY], "10")
+    if ev_power is not None:
+        s(ENTITY_EV_CHARGER, str(ev_power))
     if solax:
         s(D[CONF_ENTITY_SOLAX_SOC], "50")
         s(D[CONF_ENTITY_SOLAX_CAPACITY], "7")
@@ -83,7 +86,7 @@ def _seed(hass: HomeAssistant, *, grid=0.0, mpc_grid=0.0, mpc_batt=-1247.0, powe
         s(D[CONF_ENTITY_SOLAX_EXPORT_DURATION], "Safe")
 
 
-async def _setup(hass, *, solax=False, extra_data=None, **seed):
+async def _setup(hass, *, solax=False, extra_data=None, extra_options=None, **seed):
     _seed(hass, solax=solax, **seed)
     calls = {
         "number": async_mock_service(hass, "number", "set_value"),
@@ -94,7 +97,7 @@ async def _setup(hass, *, solax=False, extra_data=None, **seed):
     if solax:
         data[CONF_ENTITY_SOLAX_SOC] = D[CONF_ENTITY_SOLAX_SOC]
     data.update(extra_data or {})
-    entry = MockConfigEntry(domain=DOMAIN, data=data, unique_id=DOMAIN)
+    entry = MockConfigEntry(domain=DOMAIN, data=data, options=extra_options or {}, unique_id=DOMAIN)
     entry.add_to_hass(hass)
     assert await hass.config_entries.async_setup(entry.entry_id)
     await hass.async_block_till_done()
@@ -153,6 +156,29 @@ async def test_unreadable_power_does_not_affect_the_handoff(hass, bad):
     data = await _tick(hass, coordinator)
     assert data.mode == CoordinatorMode.SELF_CONSUMPTION
     assert coordinator._read_voltx_power() is None
+
+
+async def test_ev_charging_keeps_the_battery_out_of_the_handoff(hass):
+    # EMHASS does not know about the (Amber-managed) EV.  Native self-consumption would
+    # drain the battery into the car; tracking with tier 2 off serves the EV from the grid.
+    _, coordinator, _ = await _setup(hass, ev_power="3500")
+    data = await _tick(hass, coordinator)
+    assert data.mode != CoordinatorMode.SELF_CONSUMPTION
+    assert coordinator._sc_state.active is False
+
+
+async def test_idle_ev_charger_does_not_block_the_handoff(hass):
+    _, coordinator, _ = await _setup(hass, ev_power="20")
+    data = await _tick(hass, coordinator)
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+
+
+async def test_ev_starting_inside_the_handoff_exits_immediately(hass):
+    _, coordinator, _ = await _setup(hass, ev_power="20")
+    assert (await _tick(hass, coordinator)).mode == CoordinatorMode.SELF_CONSUMPTION
+    hass.states.async_set(ENTITY_EV_CHARGER, "3500")
+    data = await _tick(hass, coordinator)  # inside the 120 s dwell: the EV bypasses it
+    assert data.mode != CoordinatorMode.SELF_CONSUMPTION
 
 
 async def test_import_limit_breach_exits_the_handoff_inside_the_dwell(hass):
@@ -260,9 +286,18 @@ async def test_options_flow_exposes_and_saves_the_new_options(hass):
 
 
 async def test_entry_carrying_removed_option_keys_still_works(hass):
-    # An upgrade keeps whatever the old options flow stored; the removed keys are ignored.
+    # A real 2026.10.1 -> 2026.10.2 upgrade keeps the keys in entry.options (saved by the old
+    # options flow); they are ignored, and re-saving the options flow drops them.
     stale = {"sc_battery_tolerance": 450, "sc_discharge_handoff": True, "sc_power_smoothing_seconds": 30}
-    entry, coordinator, _ = await _setup(hass, extra_data=stale)
+    entry, coordinator, _ = await _setup(hass, extra_options=stale)
     assert entry.state.name == "LOADED"
     data = await _tick(hass, coordinator)
     assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    assert result["type"] == FlowResultType.FORM and result["step_id"] == "init"
+    for _ in range(3):  # init -> entities -> solax -> create
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert not (set(stale) & set(entry.options))

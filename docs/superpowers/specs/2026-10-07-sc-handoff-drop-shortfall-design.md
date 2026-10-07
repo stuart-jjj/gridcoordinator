@@ -29,7 +29,7 @@ margin once active), **regardless of the battery setpoint or actual battery powe
 Idle, discharge, charging and under-delivered charging plans all hand off.
 
 Kept: the minimum dwell (`sc_min_dwell_seconds`), `force_exit` (limit breach / Voltx
-control off) and `bypass_lockout` (stale plan), the Solax follow-Voltx behaviour and its
+control off / **EV charging**, see below) and `bypass_lockout` (stale plan), the Solax follow-Voltx behaviour and its
 fallbacks, `SolaxMode.FOLLOW_VOLTX`.
 
 ## Removed (all superseded; stored values in existing entries are simply ignored)
@@ -64,6 +64,16 @@ The coordinator no longer reads the Voltx power or computes a Voltx setpoint to 
 It still reads the **raw** Voltx power for the Solax follow (unchanged fallback: unreadable
 or non-finite -> Solax released). The entity `entity_voltx_battery_power` stays.
 
+## EV charging keeps the handoff off (final-review finding)
+
+EMHASS does not know about the externally controlled EV. In 2026.10.1 an EV starting during a
+charging plan flipped the battery to discharging, which the shortfall clause turned into an
+exit to tracking (tier 2 off, EV served from the grid). Without that clause a handoff would stay
+on and native Voltx (and Solax following it) would drain the batteries into the car, against the
+2026-06-21 EV-headroom design. So `ev_active` (the existing `_ev_headroom_reserve` test: EV
+charger power above its threshold) is added to `force_exit`: it bypasses the dwell, and while
+the EV charges the coordinator tracks as before. An idle charger does not block the handoff.
+
 ## Accepted trade-off
 
 With the clause gone nothing hands control back to tracking because the battery is far
@@ -72,6 +82,18 @@ plan, or sitting idle against a charging plan). SOC can therefore drift from the
 trajectory; EMHASS re-plans every 2 minutes and is expected to correct it. If drift is
 observed, raise an ADO issue in the `home-assistant` project for an SOC-deviation guard
 (same trigger as in the 2026.10.1 spec; not built now).
+
+**Silent-failure risk (final-review finding, accepted).** On 2026-06-10 (commit e2132b2) the
+rule "hand off on the grid target alone" left the battery idle all day while a solar-charging
+plan was published; that incident was linked to the Voltx work-mode register being a shadow
+register (writing it may not switch the inverter) and is parked. The 2026.10.1 shortfall clause
+incidentally acted as a detector for that failure (actual ~0 W against a -5 kW setpoint exits to
+tracking). With the clause gone nothing detects a handoff that does not actually
+self-consume: the surplus would be exported until the plan changes. Live evidence on 2026-10-07
+(13:39-13:43: grid within +/-0.5 kW, battery -4 to -5 kW) shows native mode working today, and
+the cost of the failure is the lost value of storing surplus solar, not a safety issue. If it is
+observed, raise an ADO issue in the `home-assistant` project for a grid-error watchdog (exit
+when `|grid_actual - target|` stays large for N ticks while no SOC limit applies); not built now.
 
 ## Verification
 
@@ -91,5 +113,6 @@ observed, raise an ADO issue in the `home-assistant` project for an SOC-deviatio
 
 - Removing the three options (rather than leaving them as dead UI) is part of this change;
   it is a small breaking cleanup of options introduced hours earlier in 2026.10.1.
+- EV charging joins `force_exit` (see above); the silent-failure watchdog is deliberately not built.
 - `sc_min_dwell_seconds` stays: plan blips to target ~0 for a single republish still need
   the lockout.
