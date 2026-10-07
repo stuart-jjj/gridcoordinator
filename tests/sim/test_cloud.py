@@ -57,35 +57,18 @@ def test_solax_at_ceiling_is_reported_and_voltx_absorbs_alone():
     assert res.max_opposing_run == 0
 
 
-def _active_runs(flags):
-    runs, count = [], 1
-    for prev, cur in zip(flags, flags[1:]):
-        if prev == cur:
-            count += 1
-        else:
-            runs.append((prev, count))
-            count = 1
-    runs.append((flags[-1], count))
-    return runs
-
-
-def test_persistent_charging_shortfall_backs_off_instead_of_flapping():
+def test_persistent_charging_shortfall_stays_in_the_handoff():
     # Plan wants 1247 W of charging but only a 300 W surplus exists, for 30 minutes.
-    # Tracking pins actual to the setpoint (so entry is easy); native mode then shows the
-    # shortfall and exits.  The re-entry back-off must stop that cycling every 2 x dwell.
+    # Native self-consumption takes what solar gives and never imports to fill the
+    # battery; tracking would buy the shortfall from the grid (live 2026-10-07 13:36).
     def inputs(t):
         return LOAD_W, 800.0, 0.0, -1247.0, None
 
     base = run(LEGACY, inputs, 1800)
     res = run(NEW, inputs, 1800)
-    runs = _active_runs(res.active)
-    # Never exits before the 120 s dwell (12 ticks) ...
-    assert all(n >= 12 for active, n in runs if active)
-    # ... and after a shortfall exit tracking is held >= 5 x dwell (60 ticks) before
-    # re-entering (the trailing run may be cut short by the end of the simulation).
-    assert all(n >= 60 for active, n in runs[1:-1] if not active)
-    assert res.transitions <= 7
-    assert res.import_wh < base.import_wh  # still better than staying in tracking
+    assert res.transitions == 0
+    assert res.active_ticks >= res.ticks - 2
+    assert res.import_wh < 0.25 * base.import_wh
 
 
 def test_idle_or_discharge_plan_never_exits_for_discharging_above_plan():
