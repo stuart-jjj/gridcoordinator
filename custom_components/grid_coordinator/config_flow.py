@@ -34,6 +34,7 @@ from .const import (
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
     CONF_ENTITY_VOLTX_SOC,
+    CONF_ENTITY_VOLTX_BATTERY_POWER,
     CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_EV_CHARGER_THRESHOLD,
     CONF_EV_EMERGENCY_THROTTLE,
@@ -53,7 +54,10 @@ from .const import (
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
+    CONF_SC_BATTERY_TOLERANCE,
     CONF_SC_DISCHARGE_HANDOFF,
+    CONF_SC_MIN_DWELL_SECONDS,
+    CONF_SC_POWER_SMOOTHING_SECONDS,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOC_BALANCE_DEADBAND,
@@ -87,7 +91,10 @@ from .const import (
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
+    DEFAULT_SC_BATTERY_TOLERANCE,
     DEFAULT_SC_DISCHARGE_HANDOFF,
+    DEFAULT_SC_MIN_DWELL_SECONDS,
+    DEFAULT_SC_POWER_SMOOTHING_SECONDS,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOC_BALANCE_DEADBAND,
@@ -148,6 +155,18 @@ def _params_schema(defaults: dict) -> vol.Schema:
                 )),
             vol.Required(CONF_SC_DISCHARGE_HANDOFF, default=defaults.get(CONF_SC_DISCHARGE_HANDOFF, DEFAULT_SC_DISCHARGE_HANDOFF)):
                 selector.BooleanSelector(),
+            vol.Required(CONF_SC_BATTERY_TOLERANCE, default=defaults.get(CONF_SC_BATTERY_TOLERANCE, DEFAULT_SC_BATTERY_TOLERANCE)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=2000, step=50, unit_of_measurement="W", mode=_NUM,
+                )),
+            vol.Required(CONF_SC_MIN_DWELL_SECONDS, default=defaults.get(CONF_SC_MIN_DWELL_SECONDS, DEFAULT_SC_MIN_DWELL_SECONDS)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=900, step=10, unit_of_measurement="s", mode=_NUM,
+                )),
+            vol.Required(CONF_SC_POWER_SMOOTHING_SECONDS, default=defaults.get(CONF_SC_POWER_SMOOTHING_SECONDS, DEFAULT_SC_POWER_SMOOTHING_SECONDS)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=300, step=10, unit_of_measurement="s", mode=_NUM,
+                )),
             vol.Required(CONF_TRACKING_DEADBAND, default=defaults.get(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=1000, step=50, unit_of_measurement="W", mode=_NUM,
@@ -280,6 +299,7 @@ def _entities_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_ENTITY_ENABLED, default=defaults.get(CONF_ENTITY_ENABLED, ENTITY_ID_DEFAULTS[CONF_ENTITY_ENABLED])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_CMD, default=defaults.get(CONF_ENTITY_VOLTX_CMD, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_CMD])): _TEXT,
             vol.Required(CONF_ENTITY_VOLTX_WORK_MODE, default=defaults.get(CONF_ENTITY_VOLTX_WORK_MODE, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_WORK_MODE])): _TEXT,
+            vol.Required(CONF_ENTITY_VOLTX_BATTERY_POWER, default=defaults.get(CONF_ENTITY_VOLTX_BATTERY_POWER, ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_BATTERY_POWER])): _TEXT,
             vol.Optional(CONF_ENTITY_VOLTX_CONTROL_ENABLE, default=defaults.get(CONF_ENTITY_VOLTX_CONTROL_ENABLE, "")): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGER, default=defaults.get(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)): _TEXT,
             vol.Optional(CONF_ENTITY_EV_CHARGE_CURRENT, default=defaults.get(CONF_ENTITY_EV_CHARGE_CURRENT, ENTITY_EV_CHARGE_CURRENT)): _TEXT,
@@ -394,6 +414,9 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_SELF_CONSUMPTION_MODE: self._current(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE),
             CONF_SELF_CONSUMPTION_DEADBAND: self._current(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND),
             CONF_SC_DISCHARGE_HANDOFF: self._current(CONF_SC_DISCHARGE_HANDOFF, DEFAULT_SC_DISCHARGE_HANDOFF),
+            CONF_SC_BATTERY_TOLERANCE: self._current(CONF_SC_BATTERY_TOLERANCE, DEFAULT_SC_BATTERY_TOLERANCE),
+            CONF_SC_MIN_DWELL_SECONDS: self._current(CONF_SC_MIN_DWELL_SECONDS, DEFAULT_SC_MIN_DWELL_SECONDS),
+            CONF_SC_POWER_SMOOTHING_SECONDS: self._current(CONF_SC_POWER_SMOOTHING_SECONDS, DEFAULT_SC_POWER_SMOOTHING_SECONDS),
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
             CONF_TIER2_GAIN: self._current(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN),
             CONF_GRID_PRIORITY_BAND: self._current(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND),

@@ -49,6 +49,7 @@ from .const import (
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
     CONF_ENTITY_VOLTX_SOC,
+    CONF_ENTITY_VOLTX_BATTERY_POWER,
     CONF_ENTITY_VOLTX_WORK_MODE,
     CONF_EV_CHARGER_THRESHOLD,
     CONF_EV_EMERGENCY_THROTTLE,
@@ -68,7 +69,10 @@ from .const import (
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
+    CONF_SC_BATTERY_TOLERANCE,
     CONF_SC_DISCHARGE_HANDOFF,
+    CONF_SC_MIN_DWELL_SECONDS,
+    CONF_SC_POWER_SMOOTHING_SECONDS,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOC_BALANCE_DEADBAND,
@@ -102,7 +106,10 @@ from .const import (
     DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
+    DEFAULT_SC_BATTERY_TOLERANCE,
     DEFAULT_SC_DISCHARGE_HANDOFF,
+    DEFAULT_SC_MIN_DWELL_SECONDS,
+    DEFAULT_SC_POWER_SMOOTHING_SECONDS,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOC_BALANCE_DEADBAND,
@@ -296,6 +303,18 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @property
     def _sc_discharge_handoff(self) -> bool:
         return bool(self._opt(CONF_SC_DISCHARGE_HANDOFF, DEFAULT_SC_DISCHARGE_HANDOFF))
+
+    @property
+    def _sc_battery_tolerance(self) -> float:
+        return float(self._opt(CONF_SC_BATTERY_TOLERANCE, DEFAULT_SC_BATTERY_TOLERANCE))
+
+    @property
+    def _sc_min_dwell_seconds(self) -> float:
+        return float(self._opt(CONF_SC_MIN_DWELL_SECONDS, DEFAULT_SC_MIN_DWELL_SECONDS))
+
+    @property
+    def _sc_power_smoothing_seconds(self) -> float:
+        return float(self._opt(CONF_SC_POWER_SMOOTHING_SECONDS, DEFAULT_SC_POWER_SMOOTHING_SECONDS))
 
     @property
     def _tracking_deadband(self) -> float:

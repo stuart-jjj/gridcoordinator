@@ -19,6 +19,9 @@ CONF_TEST_MODE = "test_mode"
 CONF_SELF_CONSUMPTION_MODE = "self_consumption_mode"
 CONF_SELF_CONSUMPTION_DEADBAND = "self_consumption_deadband"
 CONF_SC_DISCHARGE_HANDOFF = "sc_discharge_handoff"
+CONF_SC_BATTERY_TOLERANCE = "sc_battery_tolerance"
+CONF_SC_MIN_DWELL_SECONDS = "sc_min_dwell_seconds"
+CONF_SC_POWER_SMOOTHING_SECONDS = "sc_power_smoothing_seconds"
 CONF_TRACKING_DEADBAND = "tracking_deadband"
 CONF_TIER2_GAIN = "tier2_gain"
 CONF_GRID_PRIORITY_BAND = "grid_priority_band"
@@ -62,6 +65,7 @@ CONF_ENTITY_SOC_MAX = "entity_soc_max"
 CONF_ENTITY_ENABLED = "entity_enabled"
 CONF_ENTITY_VOLTX_CMD = "entity_voltx_cmd"
 CONF_ENTITY_VOLTX_WORK_MODE = "entity_voltx_work_mode"
+CONF_ENTITY_VOLTX_BATTERY_POWER = "entity_voltx_battery_power"
 
 # Per-battery control-enable helpers (optional binary input; blank → control on by default)
 CONF_ENTITY_VOLTX_CONTROL_ENABLE = "entity_voltx_control_enable"
@@ -77,6 +81,9 @@ DEFAULT_MPC_BATT_SIGN_INVERTED = False  # positive = discharge (matches coordina
 DEFAULT_SELF_CONSUMPTION_MODE = "Self-consumption"  # Voltx Modbus work-mode name
 DEFAULT_SELF_CONSUMPTION_DEADBAND = 50  # W — |grid_target| below this → self-consumption
 DEFAULT_SC_DISCHARGE_HANDOFF = False    # experiment: a discharge setpoint at ~0W target no longer blocks the handoff
+DEFAULT_SC_BATTERY_TOLERANCE = 300      # W — max charging shortfall vs plan that still allows the handoff; 0 = off
+DEFAULT_SC_MIN_DWELL_SECONDS = 120      # s — lock after any handoff transition (one EMHASS republish)
+DEFAULT_SC_POWER_SMOOTHING_SECONDS = 60  # s — EMA time constant for actual Voltx battery power
 DEFAULT_TRACKING_DEADBAND = 200         # W — hold command if grid error is within this band
 DEFAULT_TIER2_GAIN = 0.5                # fraction — damps tier-2 correction to prevent oscillation
 DEFAULT_GRID_PRIORITY_BAND = 0          # W — |grid_target| ≤ this → deadbeat grid tracking; 0 disables auto-trigger
@@ -133,6 +140,7 @@ ENTITY_VOLTX_CMD = "number.voltx_battery_battery_charge_discharge_power"
 # Convention: positive = discharge (battery → AC), negative = charge (AC → battery)
 
 ENTITY_VOLTX_WORK_MODE = "select.voltx_inverter_work_mode"
+ENTITY_VOLTX_BATTERY_POWER = "sensor.voltx_battery_battery_power"      # W, + = discharge
 VOLTX_WORK_MODE_CUSTOM = "Custom"
 
 # ── Solax entity ID config keys ───────────────────────────────────────────────
@@ -219,6 +227,7 @@ ENTITY_ID_DEFAULTS: dict[str, str] = {
     CONF_ENTITY_ENABLED: ENTITY_ENABLED,
     CONF_ENTITY_VOLTX_CMD: ENTITY_VOLTX_CMD,
     CONF_ENTITY_VOLTX_WORK_MODE: ENTITY_VOLTX_WORK_MODE,
+    CONF_ENTITY_VOLTX_BATTERY_POWER: ENTITY_VOLTX_BATTERY_POWER,
     # Solax
     CONF_ENTITY_SOLAX_CAPACITY: ENTITY_SOLAX_CAPACITY,
     CONF_ENTITY_SOLAX_SOC: ENTITY_SOLAX_SOC,
