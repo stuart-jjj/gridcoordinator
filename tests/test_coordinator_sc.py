@@ -33,19 +33,15 @@ def _coord(values: dict[str, str] | None = None, **attrs):
     c = SimpleNamespace(
         hass=SimpleNamespace(states=_States(values or {})),
         _entry=SimpleNamespace(options={}, data={}),
-        _voltx_power_ema=None,
-        _voltx_power_ema_at=None,
-        _sc_power_smoothing_seconds=60.0,
         **attrs,
     )
     c._opt = MethodType(GridCoordinator._opt, c)
     c._eid = MethodType(GridCoordinator._eid, c)
     c._read_voltx_power = MethodType(GridCoordinator._read_voltx_power, c)
-    c._update_voltx_power_ema = MethodType(GridCoordinator._update_voltx_power_ema, c)
     return c
 
 
-# ── Voltx power read + EMA ────────────────────────────────────────────────────
+# ── Voltx power read ──────────────────────────────────────────────────────────
 
 def test_read_voltx_power_numeric():
     assert _coord({POWER_ENTITY: "-2069"})._read_voltx_power() == -2069.0
@@ -58,22 +54,6 @@ def test_read_voltx_power_unreadable_is_none(state):
 
 def test_read_voltx_power_missing_entity_is_none():
     assert _coord({})._read_voltx_power() is None
-
-
-def test_ema_seeds_then_smooths():
-    c = _coord()
-    assert c._update_voltx_power_ema(1000.0) == 1000.0
-    second = c._update_voltx_power_ema(0.0)
-    assert 0.0 < second <= 1000.0  # moved toward 0 but not all the way (tiny dt)
-
-
-def test_ema_resets_when_sensor_unavailable():
-    c = _coord()
-    c._update_voltx_power_ema(500.0)
-    assert c._update_voltx_power_ema(None) is None
-    assert c._voltx_power_ema is None and c._voltx_power_ema_at is None
-    # the next good reading re-seeds instead of blending with the stale value
-    assert c._update_voltx_power_ema(-300.0) == -300.0
 
 
 # ── Solax share extraction (regression: behaviour moved out of the tick) ──────

@@ -14,7 +14,6 @@
           "mpc_batt_sign_inverted": "Invert mpc_battery_power sign (enable if positive = charge)",
           "self_consumption_mode": "Self-consumption work mode name",
           "self_consumption_deadband": "Self-consumption deadband (W)",
-          "sc_discharge_handoff": "Self-consumption when EMHASS plans a discharge (experimental)",
           "tracking_deadband": "Tracking deadband (W)",
           "tier2_gain": "Tier-2 correction gain",
           "grid_priority_band": "Grid-priority band (W)",
@@ -33,9 +32,7 @@
           "monitored_load_1_threshold": "Monitored load 1 — active threshold (W)",
           "monitored_load_1_headroom": "Monitored load 1 — import headroom to reserve (W)",
           "monitored_load_1_holdoff_minutes": "Monitored load 1 — headroom holdoff after power drops (min)",
-          "sc_battery_tolerance": "Self-consumption battery tolerance (W)",
-          "sc_min_dwell_seconds": "Self-consumption minimum dwell (s)",
-          "sc_power_smoothing_seconds": "Self-consumption power smoothing (s)"
+          "sc_min_dwell_seconds": "Self-consumption minimum dwell (s)"
         },
         "data_description": {
           "test_mode": "Creates simulated number/select/switch entities and wires them up automatically. Enable the 'Sim Enabled' switch in HA to start the control loop.",
@@ -46,8 +43,7 @@
           "mpc_sign_inverted": "Enable if your EMHASS mpc_grid_power uses injection convention (positive = export). Default off: positive = import.",
           "mpc_batt_sign_inverted": "Enable if your EMHASS mpc_battery_power uses load convention (positive = charge). Default off: positive = discharge.",
           "self_consumption_mode": "Exact work mode name for self-consumption on your inverter. 'Self-consumption' for Voltx Modbus; 'Self-consumption mode' for Solplanet.",
-          "self_consumption_deadband": "When |grid_target| is within this band of zero, the coordinator hands off to the inverter's native self-consumption mode. Default ±50 W.",
-          "sc_discharge_handoff": "Experimental. Normally the handoff also needs the EMHASS battery setpoint within the deadband. When on, a battery DISCHARGE setpoint no longer blocks it (at a ~0 W grid target the battery is just covering the house load, which native self-consumption does anyway). Charging setpoints still keep the coordinator in control. Off by default.",
+          "self_consumption_deadband": "When |grid_target| is within this band of zero, the coordinator hands off to the inverter's native self-consumption mode whatever the battery plan is (the battery absorbs surplus solar and never imports to fill itself). Default ±50 W.",
           "tracking_deadband": "If the grid error (actual minus target) is within this band, the battery command is held unchanged. Prevents command chatter from measurement noise and small load fluctuations. Default 200 W.",
           "tier2_gain": "Scales the proportional grid correction (tier 2). At 1.0 the full error is applied each tick, which can cause oscillation. At 0.5 (default) the error is halved each tick, converging smoothly.",
           "grid_priority_band": "When |grid_target| is within this band, Voltx switches to deadbeat grid tracking — it ignores the EMHASS battery setpoint and adjusts the battery to drive grid exactly to target (no steady-state import). Use in high-price zero-import periods. 0 disables the auto-trigger; it can still be forced via the grid-priority entity. Default 0.",
@@ -66,9 +62,7 @@
           "monitored_load_1_threshold": "When this load sensor exceeds the threshold, headroom is reserved on the grid import. Default 10 W.",
           "monitored_load_1_headroom": "Import headroom (W) to keep available when the monitored load is active. Battery charging is reduced to maintain this margin. Default 6000 W.",
           "monitored_load_1_holdoff_minutes": "How long the load must read below its threshold before headroom is released. Prevents rapid cycling for spikey loads. Default 5 min.",
-          "sc_battery_tolerance": "When the grid target is near zero, hand off to native self-consumption unless a CHARGING plan is being undershot by more than this many watts (actual battery power minus the EMHASS setpoint). Absorbing more than planned never leaves the handoff, and idle/discharge plans always pass. 0 disables this rule and keeps the older behaviour. Default 300 W.",
-          "sc_min_dwell_seconds": "After the handoff turns on or off it is locked for this long, so one noisy EMHASS republish cannot flip it and flip it straight back. After leaving because a charging plan was undershot, re-entry waits 5x this long. Safety conditions (grid limit breach, control switched off) ignore it. 0 disables. Default 120 s.",
-          "sc_power_smoothing_seconds": "Time constant used to smooth the Voltx battery power before comparing it with the plan (raw power swings by over 1 kW within a minute during native self-consumption). 0 disables smoothing. Default 60 s."
+          "sc_min_dwell_seconds": "After the self-consumption handoff turns on or off it is locked for this long, so one noisy EMHASS republish cannot flip it and flip it straight back. Safety conditions (grid limit breach, control switched off) and a stale plan ignore it. 0 disables. Default 120 s."
         }
       },
       "entities": {
@@ -157,7 +151,6 @@
           "mpc_batt_sign_inverted": "Invert mpc_battery_power sign (enable if positive = charge)",
           "self_consumption_mode": "Self-consumption work mode name",
           "self_consumption_deadband": "Self-consumption deadband (W)",
-          "sc_discharge_handoff": "Self-consumption when EMHASS plans a discharge (experimental)",
           "tracking_deadband": "Tracking deadband (W)",
           "tier2_gain": "Tier-2 correction gain",
           "grid_priority_band": "Grid-priority band (W)",
@@ -181,9 +174,7 @@
           "solax_cmd_deadband": "Solax command deadband (W)",
           "solax_zero_deadband": "Solax zero deadband (W)",
           "solax_tier1_share": "Solax tier-1 share (0–0.5)",
-          "sc_battery_tolerance": "Self-consumption battery tolerance (W)",
-          "sc_min_dwell_seconds": "Self-consumption minimum dwell (s)",
-          "sc_power_smoothing_seconds": "Self-consumption power smoothing (s)"
+          "sc_min_dwell_seconds": "Self-consumption minimum dwell (s)"
         },
         "data_description": {
           "test_mode": "When enabled, simulated entities are created for all signals. Disabling removes them on next reload.",
@@ -202,7 +193,6 @@
           "transient_discharge_ramp_step": "Max discharge decrease per tick while damping is engaged; increases use the normal ramp so a new spike is covered fast. Lower = battery holds nearer the peak (more export, less import flicker). Default 150 W/tick.",
           "ev_charger_threshold": "Activates the EV import-headroom reserve when the EV charger exceeds this power.",
           "ev_headroom": "Import headroom (W) reserved beneath the ceiling while the EV charges; both batteries ramp down charging and discharge if needed to keep it free for the EV.",
-          "sc_discharge_handoff": "Experimental: let a battery discharge setpoint (at ~0 W grid target) hand off to native self-consumption. Charging setpoints still keep control. Off by default.",
           "ev_emergency_throttle": "Backstop: cap the EV charge current to hold the headroom ceiling when the batteries cannot, then restore on recovery. Usurps the external charger; needs the EV charge-current entity.",
           "ev_watts_per_amp": "Watts per amp of EV charge current (230 single-phase, ~690 3-phase).",
           "ev_min_charge_current": "Lowest charge current (A) the throttle will command (Tesla min 5 A).",
@@ -217,9 +207,8 @@
           "solax_cmd_deadband": "Only update the Solax power setpoint when the new command differs from the last written value by at least this amount. The autorepeat trigger is always pressed. Default 50 W.",
           "solax_zero_deadband": "Suppress Solax commands within ±this of zero, releasing it to self-consumption instead of writing a near-zero setpoint. 0 disables. Default 0.",
           "solax_tier1_share": "Fraction of the EMHASS battery setpoint that Solax executes in parallel with Voltx (0 = disabled, 0.25 = Solax takes 25%). Voltx executes the remainder plus tier-2 correction. Ignored when Voltx is SOC-bounded (Solax covers residual error instead). Default 0.",
-          "sc_battery_tolerance": "When the grid target is near zero, hand off to native self-consumption unless a CHARGING plan is being undershot by more than this many watts (actual battery power minus the EMHASS setpoint). Absorbing more than planned never leaves the handoff, and idle/discharge plans always pass. 0 disables this rule and keeps the older behaviour. Default 300 W.",
-          "sc_min_dwell_seconds": "After the handoff turns on or off it is locked for this long, so one noisy EMHASS republish cannot flip it and flip it straight back. After leaving because a charging plan was undershot, re-entry waits 5x this long. Safety conditions (grid limit breach, control switched off) ignore it. 0 disables. Default 120 s.",
-          "sc_power_smoothing_seconds": "Time constant used to smooth the Voltx battery power before comparing it with the plan (raw power swings by over 1 kW within a minute during native self-consumption). 0 disables smoothing. Default 60 s."
+          "sc_min_dwell_seconds": "After the self-consumption handoff turns on or off it is locked for this long, so one noisy EMHASS republish cannot flip it and flip it straight back. Safety conditions (grid limit breach, control switched off) and a stale plan ignore it. 0 disables. Default 120 s.",
+          "self_consumption_deadband": "When |grid_target| is within this band of zero, the coordinator hands off to the inverter's native self-consumption mode whatever the battery plan is (the battery absorbs surplus solar and never imports to fill itself). Default ±50 W."
         }
       },
       "entities": {

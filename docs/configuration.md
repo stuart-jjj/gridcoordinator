@@ -153,19 +153,21 @@ There are four distinct deadbands, each serving a different purpose:
 
 **Purpose:** Whole-coordinator off-switch when nothing meaningful needs to happen.
 
-When `|grid_target|` is within this threshold of zero, the coordinator hands control to the Voltx inverter's native self-consumption firmware and reports `self_consumption` mode (see the battery tolerance below for the battery condition). This also fires when the plan is stale (both targets are forced to zero first).
+When `|grid_target|` is within this threshold of zero, the coordinator hands control to the Voltx inverter's native self-consumption firmware and reports `self_consumption` mode. This also fires when the plan is stale (both targets are forced to zero first).
 
 Setting this to 0 W means the coordinator always tries to track even tiny targets. Raising it reduces unnecessary Modbus activity during periods when EMHASS is effectively saying "do nothing."
 
-#### Self-consumption handoff tuning
+#### Self-consumption handoff
 
-**`sc_battery_tolerance`** (default 300 W; 0 = off, keeps the older rule). On a *charging* plan (EMHASS battery setpoint below zero) the handoff is held unless the smoothed actual Voltx battery power falls short of the Voltx setpoint by more than this many watts. Absorbing more than planned never leaves the handoff, and idle or discharge plans always pass (at a ~0 W grid target native self-consumption just covers the load). Needs `entity_voltx_battery_power` (default `sensor.voltx_battery_battery_power`, positive = discharge); if that sensor is unavailable the older rule (and `sc_discharge_handoff`) applies.
+The handoff to native self-consumption depends **only on the grid target**: whenever `|grid_target|` is within `self_consumption_deadband` (plus a 25 W exit margin once active) the Voltx runs its native mode, whatever the EMHASS battery plan is — charging, idle or discharging, and whether or not the battery is actually keeping up with a charging plan. At a ~0 W target native self-consumption absorbs surplus solar and covers the load, and unlike tracking it never imports from the grid to fill the battery (a cloud that cuts PV below a planned charge used to cost a few minutes of multi-kW import).
 
-**`sc_min_dwell_seconds`** (default 120 s). After the handoff turns on or off it is locked for this long, so one noisy EMHASS republish cannot flip it and flip it straight back. After leaving because a charging plan was undershot, re-entry waits 5x this long. A grid limit breach or Voltx control being switched off bypasses the lock.
+**`sc_min_dwell_seconds`** (default 120 s). After the handoff turns on or off it is locked for this long, so one noisy EMHASS republish cannot flip it and flip it straight back. A grid limit breach, Voltx control being switched off, an EV charging, or a stale plan bypasses the lock (an EV charging also keeps the handoff off, so the car is served from the grid rather than by draining the battery).
 
-**`sc_power_smoothing_seconds`** (default 60 s). Time constant for smoothing the Voltx battery power before it is compared with the plan; raw power swings by over 1 kW within a minute during native self-consumption. 0 disables smoothing.
+**Solax during the handoff.** Solax's own native self-consumption mode does not work, so while Voltx is handed off the coordinator keeps commanding Solax as a share of the combined battery power (`solax_mode` = `follow_voltx`), using the same SOC-balance share as normal tracking and the existing grid-safety, SOC and inverter limits. It always has the same sign as Voltx. It needs the Voltx battery power sensor (`entity_voltx_battery_power`, default `sensor.voltx_battery_battery_power`, positive = discharge); if that sensor is unavailable, or Solax control is off, Solax is released.
 
-**Solax during the handoff.** Solax's own native self-consumption mode does not work, so while Voltx is handed off the coordinator keeps commanding Solax as a share of Voltx's actual power (`solax_mode` = `follow_voltx`), using the same SOC-balance share as normal tracking and the existing grid-safety, SOC and inverter limits. It always has the same sign as Voltx. If the Voltx power sensor is unavailable, or Solax control is off, Solax is released as before.
+**Trade-off.** Nothing hands control back to tracking because the battery is far from its plan while the target stays near zero, so SOC can drift from the EMHASS trajectory; EMHASS re-plans every 2 minutes and is expected to correct it.
+
+**Removed in 2026.10.2:** `sc_battery_tolerance`, `sc_discharge_handoff` and `sc_power_smoothing_seconds` no longer exist (the handoff no longer looks at the battery); values stored in an existing entry are ignored.
 
 #### `tracking_deadband` (default: 200 W)
 

@@ -1,7 +1,7 @@
 """Closed-loop tick driver: runs the pure controller functions the way
 coordinator.py's _async_update_data orders them, against sim/plant.py.
 
-Only the parts the self-consumption handoff touches are reproduced (EMA, Solax share
+Only the parts the self-consumption handoff touches are reproduced (Solax share
 split, handoff decision, Voltx tracking command, Solax tier-1 / follow command).  The
 decision and command maths are the real functions from budget.py, so a change there
 is exercised here; the *ordering* below mirrors the coordinator and must be kept in
@@ -20,7 +20,6 @@ from custom_components.grid_coordinator.budget import (
     compute_solax_tier1,
     compute_voltx_command,
     decide_self_consumption,
-    ema_update,
     should_hold_self_consumption,
 )
 from custom_components.grid_coordinator.const import (
@@ -45,9 +44,7 @@ class Policy:
 
     legacy: bool
     deadband: float = 200.0
-    tolerance: float = 300.0
     min_dwell_s: float = 120.0
-    smoothing_s: float = 60.0
     solax_follow: bool = True
 
 
@@ -98,7 +95,6 @@ def run(
     plant = plant or make_plant()
     res = Result()
     state = ScState()
-    power_ema: float | None = None
     prev_cmd = 0.0
     solax_last = 0.0
     grid = 0.0
@@ -108,7 +104,6 @@ def run(
     while t <= duration_s:
         load, solar, target, mpc, recorded_power = inputs(t)
         voltx_power = recorded_power if open_loop_power else plant.voltx.power
-        power_ema = ema_update(power_ema, voltx_power, TICK_S, policy.smoothing_s)
 
         s1 = compute_solax_share(
             voltx_soc=plant.voltx.soc, solax_soc=plant.solax.soc,
@@ -137,9 +132,8 @@ def run(
                 state = ScState(active=want, last_transition_at=t)
         else:
             state = decide_self_consumption(
-                state=state, now=t, effective_target=target, voltx_setpoint=voltx_setpoint,
-                smoothed_voltx_power=power_ema, deadband=policy.deadband,
-                tolerance=policy.tolerance, min_dwell_s=policy.min_dwell_s, force_exit=breach,
+                state=state, now=t, effective_target=target, deadband=policy.deadband,
+                min_dwell_s=policy.min_dwell_s, force_exit=breach,
             )
 
         if state.active:

@@ -25,7 +25,6 @@ from .budget import (
     compute_solax_tier1,
     compute_voltx_command,
     decide_self_consumption,
-    ema_update,
 )
 from .const import (
     CONF_ENTITY_ENABLED,
@@ -74,10 +73,7 @@ from .const import (
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
-    CONF_SC_BATTERY_TOLERANCE,
-    CONF_SC_DISCHARGE_HANDOFF,
     CONF_SC_MIN_DWELL_SECONDS,
-    CONF_SC_POWER_SMOOTHING_SECONDS,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
     CONF_SOC_BALANCE_DEADBAND,
@@ -111,10 +107,7 @@ from .const import (
     DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
-    DEFAULT_SC_BATTERY_TOLERANCE,
-    DEFAULT_SC_DISCHARGE_HANDOFF,
     DEFAULT_SC_MIN_DWELL_SECONDS,
-    DEFAULT_SC_POWER_SMOOTHING_SECONDS,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
     DEFAULT_SOC_BALANCE_DEADBAND,
@@ -207,11 +200,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._override_power: float | None = None
         self._override_bypass_soc: bool = False
         self._override_expires: datetime | None = None
-        # Self-consumption handoff state (see decide_self_consumption): active flag, last
-        # transition time and lockout length, plus the smoothed Voltx power it consumes.
+        # Self-consumption handoff state (see decide_self_consumption): active flag and
+        # the monotonic time of the last transition (for the minimum-dwell lockout).
         self._sc_state = ScState()
-        self._voltx_power_ema: float | None = None
-        self._voltx_power_ema_at: float | None = None
         # Monitored load 1 — headroom reservation state
         self._mon_load_1_active: bool = False
         self._mon_load_1_below_since: datetime | None = None
@@ -290,26 +281,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except (ValueError, TypeError):
             return None
         # float() accepts "nan"/"inf"; treat them as unreadable so they never reach the
-        # EMA, the share maths or a rounded Solax command.
+        # Solax share maths or a rounded Solax command.
         return value if math.isfinite(value) else None
-
-    def _update_voltx_power_ema(self, raw: float | None) -> float | None:
-        """Update and return the smoothed Voltx power; reset (None) when unreadable.
-
-        Resetting on a bad reading means a stale average never drives the handoff
-        decision once the sensor recovers.
-        """
-        if raw is None:
-            self._voltx_power_ema = None
-            self._voltx_power_ema_at = None
-            return None
-        now = time.monotonic()
-        dt = 0.0 if self._voltx_power_ema_at is None else now - self._voltx_power_ema_at
-        self._voltx_power_ema = ema_update(
-            self._voltx_power_ema, raw, dt, self._sc_power_smoothing_seconds
-        )
-        self._voltx_power_ema_at = now
-        return self._voltx_power_ema
 
     def _solax_shares(
         self,
@@ -325,7 +298,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         effective_solax_tier2_share); the effective values are tapered to zero as
         Solax approaches its SOC ceiling.  `mpc_batt` keys the tier-1 share's
         direction, `tier2_error` the tier-2 share's.  Extracted unchanged from the
-        main tick so the handoff branch can size Voltx's setpoint the same way.
+        main tick so the Solax follow can reuse the same share and ceiling taper.
         """
         hass = self.hass
         solax_soc = float("nan")
@@ -440,20 +413,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return float(self._opt(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND))
 
     @property
-    def _sc_discharge_handoff(self) -> bool:
-        return bool(self._opt(CONF_SC_DISCHARGE_HANDOFF, DEFAULT_SC_DISCHARGE_HANDOFF))
-
-    @property
-    def _sc_battery_tolerance(self) -> float:
-        return float(self._opt(CONF_SC_BATTERY_TOLERANCE, DEFAULT_SC_BATTERY_TOLERANCE))
-
-    @property
     def _sc_min_dwell_seconds(self) -> float:
         return float(self._opt(CONF_SC_MIN_DWELL_SECONDS, DEFAULT_SC_MIN_DWELL_SECONDS))
-
-    @property
-    def _sc_power_smoothing_seconds(self) -> float:
-        return float(self._opt(CONF_SC_POWER_SMOOTHING_SECONDS, DEFAULT_SC_POWER_SMOOTHING_SECONDS))
 
     @property
     def _tracking_deadband(self) -> float:
@@ -716,48 +677,37 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         effective_target = grid_target if not plan_is_stale else 0.0
         effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
 
-        # Inputs the handoff decision needs, read before it (they used to be read later).
+        # Inputs the handoff branch (and the Voltx-off tick below) needs, read before it.
         voltx_control = self._control_enabled(hass, CONF_ENTITY_VOLTX_CONTROL_ENABLE)
         solax_on = self._solax_enabled() and self._control_enabled(
             hass, CONF_ENTITY_SOLAX_CONTROL_ENABLE
         )
         soc = _float(hass, entity_soc, 50.0)
         voltx_power_raw = self._read_voltx_power()
-        voltx_power_smoothed = self._update_voltx_power_ema(voltx_power_raw)
-        # The battery clause compares Voltx's actual power with Voltx's OWN setpoint,
-        # i.e. the plan after Solax's SOC-balance share is taken off.
-        _, _, _, sc_solax_share, _ = self._solax_shares(
-            solax_on=solax_on,
-            voltx_soc=soc,
-            mpc_batt=effective_mpc_batt,
-            tier2_error=grid_track - effective_target,
-        )
-        voltx_setpoint = effective_mpc_batt * (1.0 - sc_solax_share)
-        # Safety conditions bypass the dwell: a limit breach or Voltx control switched off
-        # must leave the handoff immediately (the handoff branch has no grid clamp).
+        # EMHASS does not know about the (externally controlled) EV.  While it charges, the
+        # EV must be served from the grid with tier 2 off — native self-consumption would
+        # drain the battery(ies) into the car — so EV charging keeps the handoff off.
+        ev_reserve, ev_active = self._ev_headroom_reserve(hass)
+        # Safety conditions bypass the dwell: a limit breach, Voltx control switched off or an
+        # EV charging must leave the handoff immediately (the branch has no grid clamp).
         limit_breach = grid_actual > self._import_limit or grid_actual < -self._export_limit
         was_active = self._sc_state.active
         self._sc_state = decide_self_consumption(
             state=self._sc_state,
             now=time.monotonic(),
             effective_target=effective_target,
-            voltx_setpoint=voltx_setpoint,
-            smoothed_voltx_power=voltx_power_smoothed,
             deadband=self._self_consumption_deadband,
-            tolerance=self._sc_battery_tolerance,
             min_dwell_s=self._sc_min_dwell_seconds,
-            allow_discharge_plan=self._sc_discharge_handoff,
-            force_exit=limit_breach or not voltx_control,
+            force_exit=limit_breach or not voltx_control or ev_active,
             bypass_lockout=plan_is_stale,
         )
         if self._sc_state.active != was_active:
             LOGGER.debug(
-                "self-consumption handoff %s (target=%.0fW setpoint=%.0fW power=%s smoothed=%s)",
+                "self-consumption handoff %s (target=%.0fW mpc_batt=%.0fW voltx_power=%s)",
                 "ON" if self._sc_state.active else "OFF",
                 effective_target,
-                voltx_setpoint,
+                effective_mpc_batt,
                 voltx_power_raw,
-                None if voltx_power_smoothed is None else round(voltx_power_smoothed),
             )
         if self._sc_state.active:
             await self._async_enter_self_consumption()
@@ -773,13 +723,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             sc_mode = CoordinatorMode.STALE_PLAN if plan_is_stale else CoordinatorMode.SELF_CONSUMPTION
             LOGGER.debug(
                 "tick | grid=%.0fW (age=%.0fs) target=%.0fW mpc_batt=%.0fW mode=%s "
-                "plan_age=%.1fmin (self-consumption) | voltx_setpoint=%.0fW power=%s "
-                "smoothed=%s d=%s solax cmd=%.0fW mode=%s",
+                "plan_age=%.1fmin (self-consumption) | voltx_power=%s solax cmd=%.0fW mode=%s",
                 grid_actual, grid_age_s, grid_target, mpc_batt_cmd, sc_mode, plan_age,
-                voltx_setpoint, voltx_power_raw,
-                None if voltx_power_smoothed is None else round(voltx_power_smoothed),
-                None if voltx_power_smoothed is None else round(voltx_power_smoothed - voltx_setpoint),
-                solax_cmd, solax_mode,
+                voltx_power_raw, solax_cmd, solax_mode,
             )
             return build_coordinator_data(
                 mode=sc_mode,
@@ -805,7 +751,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # limit.  Take the larger reserve when both are active (protects the worst
         # case without double-counting).  ev_active is tracked separately so the mode
         # can be reported as ev_charging when the EV reserve is the binding one.
-        ev_reserve, ev_active = self._ev_headroom_reserve(hass)
+        # (ev_reserve / ev_active were read above, before the self-consumption decision.)
         mon_load_reserve = self._headroom_reserve(hass)
         headroom_reserve = max(ev_reserve, mon_load_reserve)
 

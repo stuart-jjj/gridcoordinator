@@ -55,14 +55,17 @@ tree is written, and the git-ignored `config/` dev instance is excluded from the
 config entry for `grid_coordinator`, and drives the real coordinator:
 
 - Entry loads, sensors and the `set_mode` service register.
-- Self-consumption handoff: on-plan charging plan hands off; shortfall beyond tolerance stays in
-  tracking; unreadable / `nan` / `inf` Voltx power falls back to the legacy clause.
-- Safety exits inside the dwell: import-limit breach, Voltx control helper switched off.
+- Self-consumption handoff: any battery plan (charging, idle, discharging) hands off at a
+  ~0 W target, including a charging plan that is being undershot; unreadable / `nan` / `inf`
+  Voltx power does not affect the decision.
+- Safety exits inside the dwell: import-limit breach, Voltx control helper switched off, an EV starting
+  to charge (the EV is served from the grid, not by draining the battery); an idle EV charger does not block it.
 - Solax follows Voltx during the handoff (setpoint maths, register sign inversion, trigger press), and
   is released when the Voltx power sensor drops.
 - A stale plan bypasses a pending re-entry lockout.
-- The real options flow: new fields appear with defaults, the schema serialises the way the frontend
-  does it, values save into `entry.options`.
+- The real options flow: the dwell option appears with its default, the options removed in 2026.10.2
+  are absent, the schema serialises the way the frontend does it, values save into `entry.options`;
+  an entry still carrying the removed option keys loads and works.
 
 It also re-runs the repo's own unit suite against real HA instead of the stubs.
 
@@ -91,7 +94,7 @@ Everything is in `test_smoke_ha.py`:
 - To enable Solax pass `solax=True`; `_solax_enabled()` needs `CONF_ENTITY_SOLAX_SOC` in the entry data,
   which `_setup` adds.
 - Handoff state is `coordinator._sc_state`; to test a lockout set it directly with
-  `ScState(active=..., last_transition_at=time.monotonic(), lockout_s=...)` (the coordinator uses
+  `ScState(active=..., last_transition_at=time.monotonic())` (the coordinator uses
   `time.monotonic()`, so don't use a frozen clock for these).
 
 ## Pitfalls already hit (so you don't repeat them)

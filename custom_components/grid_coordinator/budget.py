@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from dataclasses import dataclass
 
 from .models import CoordinatorData, CoordinatorMode, SolaxMode, VoltxDiag
@@ -35,7 +34,12 @@ def should_hold_self_consumption(
     currently_active: bool,
     allow_discharge_plan: bool = False,
 ) -> bool:
-    """Decide whether the self-consumption deadband handoff should be active this tick.
+    """LEGACY (pre-2026.10.1) handoff rule — no longer used by the coordinator.
+
+    Kept only as the closed-loop sim's baseline policy (tests/sim) and for its unit tests; the
+    live decision is `decide_self_consumption`, which looks at the grid target only.
+
+    Decide whether the self-consumption deadband handoff should be active this tick.
 
     Entry uses `deadband`; once active, holding requires both values to stay within
     `deadband + SELF_CONSUMPTION_EXIT_MARGIN` instead, so it exits as soon as either
@@ -72,27 +76,6 @@ class ScState:
 
     active: bool = False
     last_transition_at: float | None = None
-    lockout_s: float = 0.0  # lockout length measured from last_transition_at
-
-
-# After leaving the handoff because the battery fell short of a charging plan, hold
-# tracking this many times longer than the normal dwell before re-entering.  Tracking
-# pins actual power to the setpoint, so the entry test is trivially satisfied there and
-# native mode then re-reveals the shortfall — without a back-off that cycles every
-# 2 x dwell, toggling the inverter work mode (see the shortfall scenario in tests/sim).
-SHORTFALL_REENTRY_MULT = 5
-
-
-def ema_update(prev: float | None, sample: float, dt_s: float, tau_s: float) -> float:
-    """Time-constant EMA: alpha = 1 - exp(-dt/tau). Seeds on the first sample.
-
-    tau_s <= 0 disables smoothing (returns the raw sample), so a 0 option means
-    "off" rather than a divide-by-zero.
-    """
-    if prev is None or tau_s <= 0:
-        return sample
-    alpha = 1.0 - math.exp(-max(dt_s, 0.0) / tau_s)
-    return prev + alpha * (sample - prev)
 
 
 def decide_self_consumption(
@@ -100,66 +83,37 @@ def decide_self_consumption(
     state: ScState,
     now: float,
     effective_target: float,
-    voltx_setpoint: float,
-    smoothed_voltx_power: float | None,
     deadband: float,
-    tolerance: float,
     min_dwell_s: float,
-    allow_discharge_plan: bool = False,
     force_exit: bool = False,
     bypass_lockout: bool = False,
 ) -> ScState:
     """Decide whether the Voltx native self-consumption handoff is active this tick.
 
-    Holds the handoff when |effective_target| is within the (hysteresis-widened)
-    deadband AND the battery clause passes.  The battery clause (tolerance > 0 and a
-    smoothed actual power available) applies only to a charging plan
-    (voltx_setpoint < 0): d = smoothed_voltx_power - voltx_setpoint must not exceed
-    `tolerance` (+ SELF_CONSUMPTION_EXIT_MARGIN once active), so a battery absorbing
-    MORE than planned never leaves the handoff.  For an idle/discharge plan the clause
-    always passes — at a ~0 W target native self-consumption covers the load, which is
-    what the plan wants.  With tolerance == 0, or no actual power, the legacy clause
-    from should_hold_self_consumption applies.
+    Holds the handoff whenever |effective_target| is within the (hysteresis-widened)
+    deadband, regardless of the battery setpoint or actual battery power.  At a ~0 W grid
+    target native self-consumption covers the load, absorbs any solar surplus and never
+    imports to fill the battery, so the earlier charging-shortfall clause could only make
+    things worse (live import excursion 2026-10-07 13:36).
 
     After any transition the state is locked for `min_dwell_s`; `force_exit` (safety
     conditions: limit breach, control off) bypasses the lock and forces the handoff off.
-    `bypass_lockout` (a stale plan, which zeroes target and setpoint) lets the handoff
-    start or stop immediately whenever the conditions call for it, without forcing it.
+    `bypass_lockout` (a stale plan, which zeroes the target) lets the handoff start or
+    stop immediately whenever the target calls for it, without forcing it.
     """
     threshold = deadband
     if state.active and deadband > 0:
         threshold += SELF_CONSUMPTION_EXIT_MARGIN
-    target_ok = abs(effective_target) <= threshold
-    battery_clause_active = tolerance > 0 and smoothed_voltx_power is not None
-    if battery_clause_active:
-        if voltx_setpoint >= 0:
-            battery_ok = True
-        else:
-            tol_eff = tolerance + (SELF_CONSUMPTION_EXIT_MARGIN if state.active else 0.0)
-            battery_ok = (smoothed_voltx_power - voltx_setpoint) <= tol_eff
-    elif allow_discharge_plan:
-        battery_ok = voltx_setpoint >= -threshold
-    else:
-        battery_ok = abs(voltx_setpoint) <= threshold
-    want = target_ok and battery_ok and not force_exit
+    want = abs(effective_target) <= threshold and not force_exit
     if want == state.active:
         return state
     locked = (
         state.last_transition_at is not None
-        and (now - state.last_transition_at) < state.lockout_s
+        and (now - state.last_transition_at) < min_dwell_s
     )
     if locked and not (force_exit or bypass_lockout):
         return state
-    shortfall_exit = (
-        battery_clause_active
-        and state.active
-        and not want
-        and target_ok
-        and not battery_ok
-        and not force_exit
-    )
-    lockout = min_dwell_s * (SHORTFALL_REENTRY_MULT if shortfall_exit else 1)
-    return ScState(active=want, last_transition_at=now, lockout_s=lockout)
+    return ScState(active=want, last_transition_at=now)
 
 
 def compute_solax_follow(
