@@ -141,11 +141,43 @@ async def test_charging_shortfall_stays_in_the_handoff(hass):
     assert coordinator._sc_state.active is True
 
 
+async def test_handoff_still_reports_the_emhass_battery_setpoint(hass):
+    # Voltx is not commanded in the handoff, but the diagnostic sensor must still show the
+    # EMHASS setpoint in force (it used to read 0 W, making the plan look ignored).
+    _, coordinator, _ = await _setup(hass, mpc_batt=-2884.0, power="-506")
+    data = await _tick(hass, coordinator)
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+    assert data.voltx_command == 0.0
+    assert data.mpc_batt_power == -2884.0
+    assert float(hass.states.get("sensor.grid_coordinator_mpc_battery_power").state) == -2884.0
+
+
 @pytest.mark.parametrize("plan", [-1247.0, 0.0, 800.0])
 async def test_any_battery_plan_hands_off_at_zero_target(hass, plan):
     _, coordinator, _ = await _setup(hass, mpc_batt=plan, power="1500")
     data = await _tick(hass, coordinator)
     assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+
+
+@pytest.mark.parametrize(
+    ("mpc_grid", "mpc_batt", "direction"),
+    [
+        (-4000.0, 5000.0, 1),   # price-driven discharge to the grid: export target
+        (3000.0, -5000.0, -1),  # sustained charge beyond the PV surplus: import target
+    ],
+)
+async def test_plan_that_moves_the_grid_overrides_the_handoff(hass, mpc_grid, mpc_batt, direction):
+    # The handoff is keyed off the grid target alone.  A plan that exports (discharge for a
+    # price spike) or imports (charge beyond the PV surplus) has a target outside the
+    # deadband, so Voltx is commanded along the plan instead of being left to native
+    # self-consumption.  The first-tick value is ramp-limited, so assert direction only.
+    _, coordinator, _ = await _setup(hass, mpc_grid=mpc_grid, mpc_batt=mpc_batt, power="0")
+    data = await _tick(hass, coordinator)
+    assert coordinator._sc_state.active is False
+    assert data.mode != CoordinatorMode.SELF_CONSUMPTION
+    assert data.grid_target == mpc_grid
+    assert data.mpc_batt_power == mpc_batt
+    assert data.voltx_command * direction > 0
 
 
 @pytest.mark.parametrize("bad", ["unavailable", "nan", "inf"])

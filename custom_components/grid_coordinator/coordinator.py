@@ -736,6 +736,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 export_limit=self._export_limit,
                 plan_age_minutes=plan_age,
                 override_mode=None,
+                mpc_batt_power=effective_mpc_batt,
                 solax_command=solax_cmd,
                 solax_mode=solax_mode,
             )
