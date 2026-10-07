@@ -125,7 +125,13 @@ def _follow(solax_enabled, solax_active, **kwargs):
         _solax_active=solax_active,
         _async_enter_solax_self_consumption=release,
     )
-    result = asyncio.run(GridCoordinator._async_solax_follow_voltx(c, **kwargs))
+    # A private loop: asyncio.run() leaves the thread with no current event loop on Python
+    # 3.14, which breaks later tests when Home Assistant's pytest plugins are installed.
+    loop = asyncio.new_event_loop()
+    try:
+        result = loop.run_until_complete(GridCoordinator._async_solax_follow_voltx(c, **kwargs))
+    finally:
+        loop.close()
     return result, release
 
 
