@@ -57,7 +57,13 @@ def _tick(*, mode, soc, soc_min=20, soc_max=95, bypass=False, power=9000.0, grid
     c._eid = MethodType(GridCoordinator._eid, c)
     c._solax_enabled = MethodType(GridCoordinator._solax_enabled, c)
     handle = MethodType(GridCoordinator._async_handle_override, c)
-    data = asyncio.run(handle(grid_actual=grid, plan_age=0.0))
+    # A private loop: asyncio.run() leaves the thread with no current event loop on Python
+    # 3.14, which breaks later tests when Home Assistant's pytest plugins are installed.
+    loop = asyncio.new_event_loop()
+    try:
+        data = loop.run_until_complete(handle(grid_actual=grid, plan_age=0.0))
+    finally:
+        loop.close()
     return data, c._async_write_voltx
 
 
