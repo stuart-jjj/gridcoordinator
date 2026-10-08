@@ -1277,10 +1277,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
             if soc >= soc_max and not self._override_bypass_soc:
                 cmd = 0.0
+                # Report the binding constraint, not the request that it overrode.
+                coord_mode = CoordinatorMode.SOC_CEILING
             else:
                 cmd = max(-target, cmd_floor)
                 cmd = max(-max_charge, cmd)
-            coord_mode = CoordinatorMode.OVERRIDE_FORCE_CHARGE
+                coord_mode = CoordinatorMode.OVERRIDE_FORCE_CHARGE
 
         else:  # force_export
             target = min(
@@ -1289,11 +1291,13 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             )
             if soc <= soc_min and not self._override_bypass_soc:
                 cmd = 0.0
+                # Report the binding constraint, not the request that it overrode.
+                coord_mode = CoordinatorMode.SOC_FLOOR
             else:
                 cmd = min(target, cmd_ceil)
                 cmd = max(cmd_floor, cmd)   # import safety: prevent excess import if target < residual
                 cmd = min(max_discharge, cmd)
-            coord_mode = CoordinatorMode.OVERRIDE_FORCE_EXPORT
+                coord_mode = CoordinatorMode.OVERRIDE_FORCE_EXPORT
 
         command = round(cmd)
         await self._async_write_voltx(command)
