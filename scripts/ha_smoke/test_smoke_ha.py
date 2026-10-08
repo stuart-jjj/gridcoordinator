@@ -20,6 +20,7 @@ from pytest_homeassistant_custom_component.common import MockConfigEntry, async_
 from custom_components.grid_coordinator.const import (
     CONF_ENTITY_ENABLED,
     CONF_ENTITY_GRID_POWER,
+    CONF_ENTITY_GRID_PRIORITY,
     CONF_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_SOC_MAX,
@@ -141,11 +142,43 @@ async def test_charging_shortfall_stays_in_the_handoff(hass):
     assert coordinator._sc_state.active is True
 
 
+async def test_handoff_still_reports_the_emhass_battery_setpoint(hass):
+    # Voltx is not commanded in the handoff, but the diagnostic sensor must still show the
+    # EMHASS setpoint in force (it used to read 0 W, making the plan look ignored).
+    _, coordinator, _ = await _setup(hass, mpc_batt=-2884.0, power="-506")
+    data = await _tick(hass, coordinator)
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+    assert data.voltx_command == 0.0
+    assert data.mpc_batt_power == -2884.0
+    assert float(hass.states.get("sensor.grid_coordinator_mpc_battery_power").state) == -2884.0
+
+
 @pytest.mark.parametrize("plan", [-1247.0, 0.0, 800.0])
 async def test_any_battery_plan_hands_off_at_zero_target(hass, plan):
     _, coordinator, _ = await _setup(hass, mpc_batt=plan, power="1500")
     data = await _tick(hass, coordinator)
     assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+
+
+@pytest.mark.parametrize(
+    ("mpc_grid", "mpc_batt", "direction"),
+    [
+        (-4000.0, 5000.0, 1),   # price-driven discharge to the grid: export target
+        (3000.0, -5000.0, -1),  # sustained charge beyond the PV surplus: import target
+    ],
+)
+async def test_plan_that_moves_the_grid_overrides_the_handoff(hass, mpc_grid, mpc_batt, direction):
+    # The handoff is keyed off the grid target alone.  A plan that exports (discharge for a
+    # price spike) or imports (charge beyond the PV surplus) has a target outside the
+    # deadband, so Voltx is commanded along the plan instead of being left to native
+    # self-consumption.  The first-tick value is ramp-limited, so assert direction only.
+    _, coordinator, _ = await _setup(hass, mpc_grid=mpc_grid, mpc_batt=mpc_batt, power="0")
+    data = await _tick(hass, coordinator)
+    assert coordinator._sc_state.active is False
+    assert data.mode != CoordinatorMode.SELF_CONSUMPTION
+    assert data.grid_target == mpc_grid
+    assert data.mpc_batt_power == mpc_batt
+    assert data.voltx_command * direction > 0
 
 
 @pytest.mark.parametrize("bad", ["unavailable", "nan", "inf"])
@@ -231,6 +264,62 @@ async def test_solax_released_when_voltx_power_unreadable(hass):
     data = await _tick(hass, coordinator)
     assert data.solax_mode != SolaxMode.FOLLOW_VOLTX
     assert coordinator._solax_active is False
+
+
+# ── price-triggered grid_priority ─────────────────────────────────────────────
+# The coordinator never sees prices: a HA template boolean (high buy price, live threshold
+# input_number.energy_import_threshold = 0.30 $/kWh) is configured as entity_grid_priority.
+# These tests model "buy price 45c > 30c limit" by switching that boolean on.
+
+PRICE_FLAG = "binary_sensor.import_price_high"
+
+
+async def _setup_priced(hass, *, high_price: bool, **seed):
+    hass.states.async_set(PRICE_FLAG, "on" if high_price else "off")
+    return await _setup(hass, extra_data={CONF_ENTITY_GRID_PRIORITY: PRICE_FLAG}, **seed)
+
+
+async def test_high_price_export_plan_uses_deadbeat_grid_priority(hass):
+    # 45c > 30c limit and EMHASS plans a discharge-to-grid: deadbeat tracking toward the
+    # export target, ignoring the battery setpoint's magnitude.  Asserted on the tick that
+    # runs at setup: the grid sensor here is static, so on later ticks the uncontrolled-power
+    # estimate (grid + previous command) inflates and the inverter limit would bind instead.
+    _, coordinator, _ = await _setup_priced(hass, high_price=True, mpc_grid=-4000.0, mpc_batt=5000.0, power="0")
+    data = coordinator.data
+    assert coordinator._sc_state.active is False
+    assert data.mode == CoordinatorMode.GRID_PRIORITY
+    assert data.voltx_command == coordinator._ramp_step  # one ramp step toward the 4000 W deadbeat target
+
+
+async def test_high_price_never_chases_a_planned_import(hass):
+    # A stale/unrelated positive EMHASS target must not make grid_priority deliberately
+    # import at 45c: the tracking target is clamped to min(target, 0).  With 1500 W being
+    # imported, deadbeat-to-zero discharges (unclamped it would target +3000 and charge).
+    _, coordinator, _ = await _setup_priced(
+        hass, high_price=True, grid=1500.0, mpc_grid=3000.0, mpc_batt=-5000.0, power="0"
+    )
+    data = await _tick(hass, coordinator)
+    assert coordinator._sc_state.active is False
+    assert data.mode == CoordinatorMode.GRID_PRIORITY
+    assert data.grid_target == 3000.0  # the diagnostic still shows what EMHASS planned
+    assert data.voltx_command > 0
+
+
+async def test_high_price_with_zero_grid_target_stays_in_the_handoff(hass):
+    # The handoff decision runs first and only looks at the grid target: at ~0 W the
+    # price flag does not pull the battery out of native self-consumption.
+    _, coordinator, _ = await _setup_priced(hass, high_price=True, mpc_grid=0.0, mpc_batt=-2884.0, power="-506")
+    data = await _tick(hass, coordinator)
+    assert coordinator._sc_state.active is True
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+
+
+async def test_price_below_limit_export_plan_is_normal_tracking(hass):
+    _, coordinator, _ = await _setup_priced(hass, high_price=False, mpc_grid=-4000.0, mpc_batt=5000.0, power="0")
+    data = await _tick(hass, coordinator)
+    assert data.mode != CoordinatorMode.GRID_PRIORITY
+    assert data.mode != CoordinatorMode.SELF_CONSUMPTION
+    assert data.voltx_command > 0
 
 
 # ── stale plan ────────────────────────────────────────────────────────────────
