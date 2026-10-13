@@ -1,0 +1,209 @@
+"""Price window: what to do during forecast price spikes.
+
+Pure functions, no Home Assistant imports.  `parse_amber_express` is the only code
+that knows Amber Express field names; `decide_price_window` turns the intervals plus
+the batteries' energy into export / hold / charge with a reason; `window_setpoints`
+turns that action into the grid target and combined battery setpoint the existing
+tracking path executes.
+
+Prices are $/kWh, positive (Amber Express reports feed-in as a positive earning).
+Energy is kWh at the battery; power is W.
+"""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass
+from datetime import datetime, time
+
+ACTION_EXPORT = "export"
+ACTION_HOLD = "hold"
+ACTION_CHARGE = "charge"
+
+CODE_DISABLED = "disabled"
+CODE_NO_WINDOW = "no_window"
+CODE_DATA_STALE = "data_stale"
+CODE_EXPORT_ALLOCATED = "export_allocated"
+CODE_EXPORT_UNCONFIRMED = "export_unconfirmed"
+CODE_HOLD_BELOW_MIN_PRICE = "hold_below_min_price"
+CODE_HOLD_OUTRANKED = "hold_outranked"
+CODE_HOLD_NO_SURPLUS = "hold_no_surplus"
+CODE_HOLD_CHARGE_TOO_DEAR = "hold_charge_too_dear"
+CODE_HOLD_SOC_CEILING = "hold_soc_ceiling"
+CODE_CHARGE_SHORTFALL = "charge_shortfall"
+
+_FLAGGED_STATUSES = ("potential", "spike")
+_EPS_KWH = 0.001
+
+
+@dataclass(frozen=True)
+class PriceInterval:
+    """One Amber Express interval, both channels joined."""
+
+    start: datetime
+    end: datetime
+    sell: float        # feed-in price: actual once confirmed, predicted before
+    sell_high: float   # top of the feed-in forecast range (== sell once confirmed)
+    buy: float         # general price: actual once confirmed, predicted before
+    buy_high: float    # top of the general forecast range (== buy once confirmed)
+    confirmed: bool
+    flagged: bool      # Amber marks the interval as a potential or actual spike
+
+
+@dataclass(frozen=True)
+class PriceWindowSettings:
+    spike_threshold: float = 1.00          # $/kWh, on sell_high
+    lookahead_h: float = 4.0
+    reserve_margin_h: float = 2.0
+    reserve_until: time | None = None      # local clock time; None = use the margin
+    min_sell_price: float = 0.30           # $/kWh
+    charge_ratio: float = 1.5
+    max_charge_buy_price: float | None = None  # $/kWh; None = formula only
+    round_trip_efficiency: float = 0.85
+
+
+@dataclass(frozen=True)
+class PriceWindowEnergy:
+    usable_kwh: float      # above the SOC floors, every battery under control
+    house_load_w: float    # expected average house load to the reserve horizon
+    at_soc_ceiling: bool   # True when no battery under control can take charge
+
+
+@dataclass(frozen=True)
+class PriceWindowLimits:
+    export_w: float   # maximum export power at the meter
+    charge_w: float   # maximum charge power (reported as would_command_w)
+
+
+@dataclass(frozen=True)
+class IntervalRow:
+    """One row of the working table recorded with every decision."""
+
+    start: datetime
+    end: datetime
+    price: float          # the ranking price
+    basis: str            # "confirmed", "high" or "predicted"
+    qualifies: bool
+    allocated_kwh: float
+
+
+@dataclass(frozen=True)
+class PriceWindowDecision:
+    action: str | None    # ACTION_* while a window is active, otherwise None
+    code: str
+    sentence: str
+    window_start: datetime | None = None
+    window_end: datetime | None = None
+    reserve_horizon: datetime | None = None
+    reserve_basis: str | None = None   # "forecast_margin" or "clock_time"
+    usable_kwh: float = 0.0
+    house_reserve_kwh: float = 0.0
+    surplus_kwh: float = 0.0
+    shortfall_kwh: float = 0.0
+    current_sell: float | None = None
+    current_buy: float | None = None
+    current_confirmed: bool | None = None
+    current_rank: int | None = None
+    intervals: tuple[IntervalRow, ...] = ()
+    shadow: bool = False
+    would_command_w: float | None = None   # grid W, + = import; None when inactive
+
+
+def inactive(code: str, sentence: str) -> PriceWindowDecision:
+    """A decision that leaves control with EMHASS tracking."""
+    return PriceWindowDecision(action=None, code=code, sentence=sentence)
+
+
+# ── parsing ───────────────────────────────────────────────────────────────────
+
+
+def _when(value) -> datetime | None:
+    if isinstance(value, datetime):
+        parsed = value
+    elif isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+def _price(value) -> float | None:
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
+def _high(entry: dict, fallback: float) -> float:
+    advanced = entry.get("advanced_price_predicted")
+    if isinstance(advanced, dict):
+        high = _price(advanced.get("high"))
+        if high is not None:
+            return max(high, fallback)
+    return fallback
+
+
+def _entries(attrs) -> list[dict]:
+    forecast = attrs.get("detailedForecast") if isinstance(attrs, dict) else None
+    if not isinstance(forecast, (list, tuple)):
+        return []
+    return [entry for entry in forecast if isinstance(entry, dict)]
+
+
+def parse_amber_express(feed_in_attrs, general_attrs, now: datetime) -> list[PriceInterval]:
+    """Join the two channels' `detailedForecast` lists into price intervals.
+
+    Amber Express starts each interval one second late (`02:00:01`) and ends it on the
+    boundary (`02:05:00`), so starts are rounded down to the minute; otherwise no
+    interval would cover the first second of each one.  Intervals that have ended and
+    entries that cannot be parsed are dropped.  Returns an empty list when no interval
+    covers `now`, which the caller treats as stale data.
+    """
+    general_by_start: dict[datetime, dict] = {}
+    for entry in _entries(general_attrs):
+        start = _when(entry.get("start_time"))
+        if start is not None:
+            general_by_start[start.replace(second=0, microsecond=0)] = entry
+
+    intervals: list[PriceInterval] = []
+    for entry in _entries(feed_in_attrs):
+        start = _when(entry.get("start_time"))
+        end = _when(entry.get("end_time"))
+        sell = _price(entry.get("per_kwh"))
+        if start is None or end is None or sell is None:
+            continue
+        start = start.replace(second=0, microsecond=0)
+        if end <= start or end <= now:
+            continue
+        general = general_by_start.get(start)
+        if general is None:
+            continue
+        buy = _price(general.get("per_kwh"))
+        if buy is None:
+            continue
+        confirmed = entry.get("estimate") is False and general.get("estimate") is False
+        intervals.append(
+            PriceInterval(
+                start=start,
+                end=end,
+                sell=sell,
+                sell_high=sell if confirmed else _high(entry, sell),
+                buy=buy,
+                buy_high=buy if confirmed else _high(general, buy),
+                confirmed=confirmed,
+                flagged=(
+                    entry.get("spike_status") in _FLAGGED_STATUSES
+                    or general.get("spike_status") in _FLAGGED_STATUSES
+                ),
+            )
+        )
+    intervals.sort(key=lambda interval: interval.start)
+    if not intervals or intervals[0].start > now:
+        return []
+    return intervals
