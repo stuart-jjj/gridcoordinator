@@ -33,6 +33,7 @@ from custom_components.grid_coordinator.const import (
     CONF_ENTITY_SOLAX_SOC_MIN,
     CONF_ENTITY_VOLTX_BATTERY_POWER,
     CONF_ENTITY_VOLTX_CAPACITY,
+    CONF_ENTITY_VOLTX_CONTROL_ENABLE,
     CONF_ENTITY_VOLTX_MAX_CHARGE,
     CONF_ENTITY_VOLTX_MAX_DISCHARGE,
     CONF_ENTITY_VOLTX_SOC,
@@ -89,6 +90,17 @@ def _forecast(prices, *, confirmed_first=True, high=None):
             }
         entries.append(entry)
     return {"detailedForecast": entries}
+
+
+_RIGS: list["Rig"] = []
+
+
+@pytest.fixture(autouse=True)
+def _close_rig_loops():
+    """Close every Rig's private event loop when its test ends."""
+    yield
+    while _RIGS:
+        _RIGS.pop()._loop.close()
 
 
 class Rig:
@@ -155,6 +167,7 @@ class Rig:
         self.clock = 0.0  # the price window's clock: 10 s a tick
         c._pw_monotonic = lambda: self.clock
         self._loop = asyncio.new_event_loop()
+        _RIGS.append(self)
 
     def prices(self, sell, *, buy=None, high=None, confirmed_first=True, age_s=0.0):
         buy = [p + 0.11 for p in sell] if buy is None else buy
@@ -708,3 +721,45 @@ def test_a_carried_export_in_shadow_still_does_not_control():
 def test_no_carry_without_a_recent_export():
     rig = Rig(sell=HOLD_PRICES, confirmed_first=False)
     assert rig.tick().price_window.action == "hold"
+
+
+# ── PR review (Copilot) ───────────────────────────────────────────────────────
+
+VOLTX_CTL = "input_boolean.voltx_control"
+
+
+def _voltx_off(rig):
+    rig.states.set(VOLTX_CTL, "off")
+    return rig
+
+
+@pytest.mark.parametrize("make", [Rig, _short_rig])
+def test_no_battery_under_control_leaves_the_price_window_out(make):
+    # Voltx control switched off and no Solax: nothing to export from or charge.
+    rig = _voltx_off(make(solax=False, options={CONF_ENTITY_VOLTX_CONTROL_ENABLE: VOLTX_CTL}))
+    data = rig.tick()
+    assert data.price_window.action is None
+    assert data.price_window.code == "disabled"
+    assert "No battery" in data.price_window.sentence
+    assert data.grid_target == 0  # the EMHASS plan
+
+
+def test_an_export_forecast_blocked_by_the_enable_gate_is_not_carried_afterwards():
+    rig = Rig()
+    rig.states.set(E[CONF_ENTITY_ENABLED], "off")
+    rig.tick()  # the forecast says export, but the coordinator is disabled
+    rig.states.set(E[CONF_ENTITY_ENABLED], "on")
+    rig.prices(HOLD_PRICES, confirmed_first=False)
+    data = rig.tick()
+    assert data.price_window.action == "hold"  # not export_carried: nothing was exporting
+
+
+def test_solax_alone_closes_a_small_gap_to_the_export_limit():
+    rig = _voltx_off(Rig(options={CONF_ENTITY_VOLTX_CONTROL_ENABLE: VOLTX_CTL}))
+    _grid(rig, -8500)  # solar is already exporting 8.5 kW
+    data = rig.tick()
+    assert (data.voltx_command, data.solax_command) == (0, 1500)
+    _grid(rig, -9900)  # the Solax delivered 100 W less than asked
+    for _ in range(8):  # its command has to stand for a minute before that is believed
+        data = rig.tick()
+    assert data.solax_command == 1600

@@ -695,7 +695,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             max_charge += float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
             full.append(soc >= soc_max)
         energy = PriceWindowEnergy(
-            usable_kwh=usable, house_load_w=0.0, at_soc_ceiling=bool(full) and all(full)
+            usable_kwh=usable, house_load_w=0.0, at_soc_ceiling=all(full)
         )
         return energy, max_discharge, max_charge
 
@@ -734,7 +734,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except Exception:  # noqa: BLE001 — an unknown zone must not stop the control loop
             local_now = now
         intervals = parse_amber_express(attrs[0], attrs[1], local_now)
-        energy, _max_discharge, max_charge = self._pw_batteries()
+        energy, max_discharge, max_charge = self._pw_batteries()
+        if max_discharge <= 0 and max_charge <= 0:
+            return inactive(CODE_DISABLED, "No battery is under the coordinator's control.")
         decision = decide_price_window(
             intervals,
             local_now,
@@ -847,6 +849,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # override): the next tick that is counts as a change of decision.
             self._pw_last_action = None
             self._pw_setpoint = None
+            if decision.action is not None and not decision.shadow:
+                # The disabled gate or a manual override stopped it: nothing was
+                # exporting, so there is nothing to carry on afterwards.
+                self._pw_export_at = None
         elif data.mode in _UNBOUND_MODES:
             data = replace(data, mode=_PRICE_WINDOW_MODES[decision.action])
         return replace(data, price_window=decision)
@@ -1220,6 +1226,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 ramp_step=float("inf") if pw_action is not None else self._ramp_step,
                 tier2_gain=0.0 if pw_action is not None else self._tier2_gain,
                 allow_grid_priority=pw_action is None,
+                tracking_deadband=0.0 if pw_action is not None else self._tracking_deadband,
             )
 
         # grid_priority's deadbeat formula (budget.py) tracks whatever target it's
@@ -1544,6 +1551,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         ramp_step: float,
         tier2_gain: float,
         allow_grid_priority: bool,
+        tracking_deadband: float,
     ) -> CoordinatorData:
         """One tick when Voltx (primary) control is switched off.
 
@@ -1597,7 +1605,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 export_limit=self._export_limit,
                 ramp_step=ramp_step,
                 plan_is_stale=plan_is_stale,
-                tracking_deadband=self._tracking_deadband,
+                tracking_deadband=tracking_deadband,
                 headroom_reserve=headroom_reserve,
                 tier2_gain=effective_tier2_gain,
                 grid_priority=grid_priority,
