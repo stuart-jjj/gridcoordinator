@@ -363,3 +363,17 @@ is commanded during `export`.
 3. After a real event reads correctly in shadow: turn shadow off, then remove
    those three automations and fix `emhass_plan_export_limit` at its normal
    value.
+
+## Changed after the branch review (2026-10-13)
+
+A fresh review of the finished branch found three things that are now fixed, each with a test:
+
+- **Both batteries make up the setpoint.** The combined setpoint is split between Voltx and Solax by the SOC-balance share. If that asks the Solax for more than it can deliver (its 3 kW limit, or its SOC floor or ceiling), the Voltx takes the remainder, and the other way round. Before, the remainder was dropped and export sat 15 to 18% under the limit.
+- **A maximum charge buy price that cannot be read blocks charging.** This is the one exception to "an unreadable setting falls back to its default": the default is no cap, and losing the cap silently would allow buying at any price. The reason reads `hold_charge_too_dear` and says the setting cannot be read. A blank setting still means no cap.
+- **An interval that will never be sold into is not charged for.** A flagged interval whose top-of-range price is under the minimum sell price no longer counts as unserved.
+
+One finding is not fixed and must be settled before shadow mode is turned off: see "Open before going live" below.
+
+### Open before going live
+
+The battery setpoint is anchored on the grid reading plus the last *commanded* battery power. If the batteries take longer than one tick to respond (the Voltx took 18 to 38 s on 2026-10-12), the next ticks see a grid reading that does not yet include the step, and the command rises to the batteries' maximum. When they respond, export overshoots the limit (about 12.2 kW against 10 kW in the review's test; about 13.4 kW import against 12 kW when charging) until the next reading corrects it. Anchoring on *measured* battery power would remove the overshoot but would also stop the controller making up for a Voltx that delivers less than commanded, and the Solax has no measured-power entity configured. The choice needs the first shadow event's data.

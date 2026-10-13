@@ -59,6 +59,9 @@ class PriceWindowSettings:
     min_sell_price: float = 0.30           # $/kWh
     charge_ratio: float = 1.5
     max_charge_buy_price: float | None = None  # $/kWh; None = formula only
+    # The cap is set but could not be read (its helper is unavailable): no charging,
+    # rather than charging without the one absolute guard against buying dear.
+    max_charge_buy_price_unreadable: bool = False
     round_trip_efficiency: float = 0.85
 
 
@@ -311,7 +314,8 @@ def decide_price_window(
     unserved = [
         interval
         for interval in qualifying
-        if need_kwh(interval) - allocated.get(interval.start, 0.0) > _EPS_KWH
+        if interval.sell_high >= settings.min_sell_price  # else it is never sold into
+        and need_kwh(interval) - allocated.get(interval.start, 0.0) > _EPS_KWH
     ]
     shortfall = sum(need_kwh(i) - allocated.get(i.start, 0.0) for i in unserved)
     rank = sellable.index(current) + 1 if current in sellable else None
@@ -404,7 +408,13 @@ def decide_price_window(
             f"{len(unserved)} spike intervals unserved, cheapest predicted "
             f"{_money(cheapest.sell)}; shortfall {shortfall:.1f} kWh"
         )
-        if capped:
+        if settings.max_charge_buy_price_unreadable:
+            code = CODE_HOLD_CHARGE_TOO_DEAR
+            sentence += (
+                f" Not charging: the maximum charge buy price setting cannot be read; "
+                f"{situation}."
+            )
+        elif capped:
             code = CODE_HOLD_CHARGE_TOO_DEAR
             sentence += (
                 f" Not charging: buying at {_money(buy)} is over the "
@@ -502,3 +512,25 @@ def window_setpoints(
         return grid_uncontrolled - battery, battery
     battery = max(-max_charge, min(max_discharge, grid_uncontrolled - ev_power))
     return grid_uncontrolled - battery, battery
+
+
+def split_setpoint(
+    total: float,
+    share: float,
+    *,
+    a_max_discharge: float,
+    a_max_charge: float,
+    b_max_discharge: float,
+    b_max_charge: float,
+) -> tuple[float, float]:
+    """Split a combined battery setpoint (W, + = discharge) between two batteries.
+
+    Battery B is asked for `share` of the total; whatever either battery cannot
+    deliver (a power limit, or a limit of 0 because it is at an SOC bound) goes to
+    the other.  Returns (a, b).  The parts sum to `total` unless both are at a limit.
+    """
+    share = min(1.0, max(0.0, share))
+    b = max(-b_max_charge, min(b_max_discharge, total * share))
+    a = max(-a_max_charge, min(a_max_discharge, total - b))
+    b = max(-b_max_charge, min(b_max_discharge, total - a))
+    return a, b

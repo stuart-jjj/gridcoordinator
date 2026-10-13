@@ -444,3 +444,45 @@ def test_maximum_charge_buy_price_from_a_helper_entity_blocks_charging():
     data = rig.tick()
     assert data.price_window.code == "hold_charge_too_dear"
     assert data.grid_target == 0
+
+
+# ── review fixes ──────────────────────────────────────────────────────────────
+
+
+def test_export_gives_voltx_what_solax_cannot_deliver():
+    # Solax is the fuller battery, so SOC balancing asks it for more than its 3 kW.
+    rig = Rig()
+    rig.states.set(E[CONF_ENTITY_VOLTX_SOC], 60)
+    rig.states.set(E[CONF_ENTITY_SOLAX_SOC], 85)
+    data = rig.tick()
+    assert data.price_window.code == "export_allocated"
+    assert (data.voltx_command, data.solax_command) == (7800, 3000)
+
+
+def test_export_with_solax_at_its_floor_runs_voltx_flat_out():
+    rig = Rig()
+    rig.states.set(E[CONF_ENTITY_VOLTX_SOC], 33)
+    rig.states.set(E[CONF_ENTITY_SOLAX_SOC], 30)
+    rig.states.set(E[CONF_ENTITY_SOLAX_SOC_MIN], 30)
+    data = rig.tick()
+    assert data.price_window.code == "export_allocated"
+    assert (data.voltx_command, data.solax_command) == (10000, 0)
+
+
+def test_charge_gives_voltx_what_solax_cannot_take():
+    rig = _short_rig()
+    rig.states.set(E[CONF_ENTITY_VOLTX_SOC], 60)  # Solax is much the emptier battery
+    rig.states.set(LOAD, 20000)  # so the house reserve still leaves a shortfall
+    data = rig.tick()
+    assert data.price_window.code == "charge_shortfall"
+    assert data.solax_command == -3000
+    assert data.voltx_command + data.solax_command == pytest.approx(-11200, abs=2)
+
+
+def test_unreadable_maximum_charge_buy_price_helper_blocks_charging():
+    rig = _short_rig(options={CONF_PW_MAX_CHARGE_BUY_PRICE: "input_number.max_buy"})
+    rig.states.set("input_number.max_buy", "unavailable")
+    data = rig.tick()
+    assert data.price_window.code == "hold_charge_too_dear"
+    assert "cannot be read" in data.price_window.sentence
+    assert data.grid_target == 0

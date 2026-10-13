@@ -16,6 +16,7 @@ from custom_components.grid_coordinator.price_window import (
     decide_price_window,
     decision_attributes,
     parse_amber_express,
+    split_setpoint,
     window_setpoints,
 )
 
@@ -505,3 +506,44 @@ def test_hold_setpoint_carries_the_house_at_zero_grid():
 def test_hold_setpoint_leaves_the_ev_on_the_grid():
     # 7.8 kW at the meter of which 7 kW is the car: the batteries carry the other 800 W.
     assert window_setpoints(ACTION_HOLD, grid_uncontrolled=7800.0, ev_power=7000.0, **_SP) == (7000.0, 800.0)
+
+
+# ── review fixes ──────────────────────────────────────────────────────────────
+
+
+def test_unreadable_maximum_charge_buy_price_blocks_charging():
+    # The cap is set but its helper cannot be read: do not charge without it.
+    unreadable = PriceWindowSettings(max_charge_buy_price_unreadable=True)
+    d = _shortfall(0.20, settings=unreadable)
+    assert (d.action, d.code) == (ACTION_HOLD, "hold_charge_too_dear")
+    assert "maximum charge buy price setting cannot be read" in d.sentence
+    assert _shortfall(0.20).action == ACTION_CHARGE
+
+
+def test_flagged_interval_below_the_minimum_sell_price_is_not_charged_for():
+    # Amber flags a later interval, but at 10c it will never be sold into: nothing is
+    # unserved, so there is nothing to charge for however cheap buying is.
+    intervals = [_iv(0, 0.05, buy=0.03, confirmed=True), _iv(5, 0.10, flagged=True)]
+    d = _decide(intervals, _energy(57.6))
+    assert (d.action, d.code) == (ACTION_HOLD, "hold_below_min_price")
+    assert d.shortfall_kwh == 0
+
+
+_SPLIT = dict(a_max_discharge=10000.0, a_max_charge=9600.0, b_max_discharge=3000.0, b_max_charge=3000.0)
+
+
+def test_split_follows_the_share_when_both_can_deliver():
+    assert split_setpoint(10800.0, 1 / 6, **_SPLIT) == pytest.approx((9000.0, 1800.0))
+
+
+def test_split_gives_the_first_battery_what_the_second_cannot_deliver():
+    assert split_setpoint(10800.0, 0.5, **_SPLIT) == pytest.approx((7800.0, 3000.0))
+    assert split_setpoint(-11200.0, 0.5, **_SPLIT) == pytest.approx((-8200.0, -3000.0))
+    empty = dict(_SPLIT, b_max_discharge=0.0)
+    assert split_setpoint(10800.0, 1 / 6, **empty) == pytest.approx((10000.0, 0.0))
+
+
+def test_split_gives_the_second_battery_what_the_first_cannot_deliver():
+    assert split_setpoint(12500.0, 0.1, **_SPLIT) == pytest.approx((10000.0, 2500.0))
+    empty = dict(_SPLIT, a_max_discharge=0.0)
+    assert split_setpoint(10800.0, 1 / 6, **empty) == pytest.approx((0.0, 3000.0))

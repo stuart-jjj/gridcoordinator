@@ -173,6 +173,7 @@ from .price_window import (
     decide_price_window,
     inactive,
     parse_amber_express,
+    split_setpoint,
     window_setpoints,
 )
 
@@ -627,6 +628,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         return _parse_clock(_str(self.hass, raw, ""))
 
     def _pw_settings(self) -> PriceWindowSettings:
+        max_buy = self._pw_optional_number(CONF_PW_MAX_CHARGE_BUY_PRICE)
+        max_buy_set = bool(str(self._opt(CONF_PW_MAX_CHARGE_BUY_PRICE, "")).strip())
         return PriceWindowSettings(
             spike_threshold=self._pw_number(CONF_PW_SPIKE_THRESHOLD, DEFAULT_PW_SPIKE_THRESHOLD),
             lookahead_h=self._pw_number(CONF_PW_LOOKAHEAD_HOURS, DEFAULT_PW_LOOKAHEAD_HOURS),
@@ -634,7 +637,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             reserve_until=self._pw_clock(CONF_PW_RESERVE_UNTIL),
             min_sell_price=self._pw_number(CONF_PW_MIN_SELL_PRICE, DEFAULT_PW_MIN_SELL_PRICE),
             charge_ratio=self._pw_number(CONF_PW_CHARGE_RATIO, DEFAULT_PW_CHARGE_RATIO),
-            max_charge_buy_price=self._pw_optional_number(CONF_PW_MAX_CHARGE_BUY_PRICE),
+            max_charge_buy_price=max_buy,
+            max_charge_buy_price_unreadable=max_buy_set and max_buy is None,
             round_trip_efficiency=self._pw_number(
                 CONF_PW_ROUND_TRIP_EFFICIENCY, DEFAULT_PW_ROUND_TRIP_EFFICIENCY
             ),
@@ -1122,6 +1126,32 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # ── compute command (pure function, no HA calls) ───────────────────
         voltx_mpc_batt = effective_mpc_batt * (1.0 - effective_solax_share)
+        if pw_action is not None and solax_on:
+            # The SOC-balance share can ask a battery for more than it can deliver (the
+            # Solax's 3 kW, or either battery at an SOC bound).  Tier 2 normally makes
+            # up the difference, and it is off here, so the split does it directly.
+            pw_solax_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
+            pw_solax_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
+            voltx_mpc_batt, pw_solax_part = split_setpoint(
+                effective_mpc_batt,
+                effective_solax_share,
+                # Voltx's own SOC bounds are left to compute_voltx_command, which reports
+                # them as the mode and hands the remainder to Solax itself.
+                a_max_discharge=max_discharge,
+                a_max_charge=max_charge,
+                b_max_discharge=(
+                    float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
+                    if solax_soc > pw_solax_min else 0.0
+                ),
+                b_max_charge=(
+                    float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
+                    if solax_soc < pw_solax_max else 0.0
+                ),
+            )
+            effective_solax_share = (
+                pw_solax_part / effective_mpc_batt if abs(effective_mpc_batt) > 1e-9 else 0.0
+            )
+            solax_share = effective_solax_share
 
         # While the EV charges, follow the EMHASS plan (tier 1) without chasing the grid
         # target (tier 2 off): the EV load is served by grid import, not by draining the
