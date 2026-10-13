@@ -117,16 +117,39 @@ Pure. Steps:
    - `export` at maximum export power if the current interval received any
      allocation.
    - `charge` at maximum charge power if at least one qualifying interval was
-     left unserved, the batteries are below the SOC ceiling, and
+     left unserved, the batteries are below the SOC ceiling, `buy` is at or
+     below the maximum charge buy price (when that setting is set), and
      `buy / round-trip efficiency * charge ratio <= predicted sell` of the
      cheapest unserved qualifying interval. Charging uses the `predicted`
-     price, not `sell_high`.
+     price, not `sell_high`. The maximum charge buy price is an absolute cap
+     that overrides the formula; if it is unset the formula alone decides.
    - `hold` otherwise.
 
 **Interval boundaries.** When the clock passes into a new interval before
 Amber Express has confirmed its price, that interval is still an estimate and
 is ranked on `sell_high`. If it might spike, export continues across the
 boundary without waiting for confirmation.
+
+**Why two sell prices.** Amber Express gives each forecast interval a
+`predicted` price and a `low` to `high` range. `sell` is the single price: the
+actual price once the interval is confirmed, the prediction before that.
+`sell_high` is the top of the range. A confirmed current interval is ranked on
+`sell` because its price is known. Every other interval is ranked on
+`sell_high`, so an interval that might spike is treated as if it will, and
+energy is kept for it. This is deliberately one-sided. Keeping energy for a
+spike that does not arrive costs little: the energy is still in the battery.
+Selling it cheaply just before a spike that does arrive is the expensive
+mistake. Charging is the opposite case, since buying costs money now, so the
+charge rule uses `predicted`.
+
+**No power moderation.** Export is either full power or none. Revenue in an
+interval is price x energy, so with a fixed amount of energy the best plan
+fills the highest-priced intervals to the export limit before any goes to a
+lower-priced one. Selling at reduced power in a lower-priced interval to keep
+some back is a weaker version of the same choice the allocation already makes:
+if the energy is needed for higher-priced intervals, the lower one gets none;
+if it is not, the lower one gets full power. Only the last interval served can
+be partly served, and it exports at full power until its share is spent.
 
 ### Coordinator integration
 
@@ -153,9 +176,10 @@ as they do in tracking. The plan-staleness check does not apply to a price
 window tick, because the plan is not being followed.
 
 **Ramp.** `DEFAULT_RAMP_STEP` is 1500 W per tick, so going from 5 kW to 9.5 kW
-takes about 30 s. The implementation plan must decide whether price window
-`export` and `charge` bypass or raise the ramp step, and confirm the choice
-against the Voltx's actual response.
+takes about 30 s. The price window bypasses the ramp step: on the first tick
+after a change of decision (to `export`, `charge` or `hold`) the new target is
+commanded directly. The implementation plan confirms this against the Voltx's
+actual response.
 
 **Stale data.** If either Amber Express entity is unavailable, its
 `detailedForecast` is missing, no interval covers `now`, or the entity was
@@ -199,7 +223,7 @@ three layers.
 | `hold_below_min_price` | Current price is under the minimum sell price |
 | `hold_outranked` | Surplus is reserved for higher-priced intervals |
 | `hold_no_surplus` | The house reserve takes all usable energy |
-| `hold_charge_too_dear` | Shortfall exists, but the buy price fails the charge rule |
+| `hold_charge_too_dear` | Shortfall exists, but the buy price fails the charge rule or exceeds the maximum charge buy price |
 | `hold_soc_ceiling` | Shortfall exists and the charge rule passes, but the batteries are full |
 | `charge_shortfall` | Qualifying intervals unserved and the charge rule passes |
 
@@ -252,6 +276,7 @@ pattern (a time setting accepts `HH:MM` or an `input_datetime`).
 | Reserve-until clock time | unset |
 | Minimum sell price inside a window | 0.30 $/kWh |
 | Charge ratio | 1.5 |
+| Maximum charge buy price | unset, formula only |
 | Round-trip efficiency | 0.85 |
 | Expected house load | unset; required to enable |
 
@@ -275,7 +300,8 @@ lookahead setting shortens this if it proves too blunt.
   start; no interval covering `now` returns empty.
 - **Decision:** plenty of energy (all sellable intervals served); tight energy
   (mid-price current interval outranked); no surplus; shortfall with a cheap
-  buy price (charge); shortfall with a dear buy price; full batteries;
+  buy price (charge); shortfall with a dear buy price; buy price above the maximum charge buy
+  price; full batteries;
   qualifying interval beyond the lookahead (inactive); clock-time reserve
   today and rolling to tomorrow; unconfirmed current interval served on its
   high bound.
