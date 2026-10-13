@@ -47,6 +47,32 @@ Common fields:
 - `duration_minutes` (default 60)
 - `bypass_soc` (optional, force modes only)
 
+## Price window
+
+During forecast price spikes the coordinator stops following the EMHASS plan and
+decides for itself, every tick, whether to export at full power, hold, or charge.
+Prices come from the Amber Express integration's `detailedForecast` attribute.
+
+- A *window* opens when an interval within the lookahead (default 4 h) could reach
+  the spike threshold (default $1.00/kWh on the top of the feed-in forecast range)
+  or is flagged by Amber as a potential or actual spike.
+- Energy to run the house until the window ends plus a margin (default 2 h), or
+  until a set clock time, is kept back. What is left is the surplus.
+- The surplus goes to the best-priced intervals first, each at full export power
+  from both batteries. If the current interval is one of them, the coordinator
+  exports; otherwise it holds.
+- If intervals that could spike are left without energy and buying now is cheap
+  enough against their predicted price, it charges at full power.
+
+Every decision carries a reason: `sensor.grid_coordinator_price_window_reason`
+holds a code (`export_allocated`, `hold_outranked`, `charge_shortfall`, ...) and
+its attributes hold a sentence with the figures and the per-interval working.
+
+The feature is off until its enable entity, both Amber Express entities and an
+expected house load entity are set in the options flow's Price Window step. It
+starts in **shadow mode** (reports, does not control) until the shadow entity is
+turned off. The manual override and the enable gate still take precedence.
+
 ## Configuration
 
 Configured from the UI config flow and options flow.
