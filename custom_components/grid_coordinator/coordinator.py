@@ -152,6 +152,9 @@ from .const import (
     ENTITY_MON_LOAD_1,
     EV_RELEASE_MARGIN,
     LOGGER,
+    PRICE_WINDOW_SETTLE_MAX_TICKS,
+    PRICE_WINDOW_SETTLE_MIN_TICKS,
+    PRICE_WINDOW_SETTLE_TOLERANCE_W,
     PRICE_WINDOW_STALE_MINUTES,
     SOLAX_EXPORT_DURATION_SAFE,
     SOLAX_RC_MODE_DISABLED,
@@ -174,6 +177,7 @@ from .price_window import (
     inactive,
     parse_amber_express,
     split_setpoint,
+    track_setpoint,
     window_setpoints,
 )
 
@@ -289,6 +293,15 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._pw_control: bool = False
         self._pw_last_action: str | None = None
         self._pw_last_code: str | None = None
+        # Combined battery setpoint the price window last asked for (None when it is not
+        # in control); see the settle bookkeeping in _async_tick for the rest.
+        self._pw_setpoint: float | None = None
+        self._pw_stood_cmd: list[float] = [0.0, 0.0]   # Voltx, Solax
+        self._pw_stood: tuple[int, int] = (0, 0)
+        self._pw_recent: tuple[deque[float], deque[float]] = (
+            deque(maxlen=PRICE_WINDOW_SETTLE_MAX_TICKS + 1),
+            deque(maxlen=PRICE_WINDOW_SETTLE_MAX_TICKS + 1),
+        )
         # Entities already warned about, so a missing control input logs once not 6×/min
         self._warned_missing: set[str] = set()
         super().__init__(
@@ -785,6 +798,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             # Not in control this tick (inactive, shadow, disabled gate or a manual
             # override): the next tick that is counts as a change of decision.
             self._pw_last_action = None
+            self._pw_setpoint = None
         elif data.mode in _UNBOUND_MODES:
             data = replace(data, mode=_PRICE_WINDOW_MODES[decision.action])
         return replace(data, price_window=decision)
@@ -917,6 +931,20 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # drain the battery(ies) into the car — so EV charging keeps the handoff off.
         ev_reserve, ev_active = self._ev_headroom_reserve(hass)
 
+        # Settle bookkeeping, kept on every tick so a price window that opens knows where
+        # it stands: how many ticks each battery's command has stood (within the
+        # tolerance), and each battery's commands over the last
+        # PRICE_WINDOW_SETTLE_MAX_TICKS, which bound what it may actually be doing.
+        stood = []
+        for index, cmd in enumerate((self._prev_cmd, self._solax_last_written_cmd)):
+            if abs(cmd - self._pw_stood_cmd[index]) > PRICE_WINDOW_SETTLE_TOLERANCE_W:
+                self._pw_stood_cmd[index] = cmd
+                stood.append(0)
+            else:
+                stood.append(self._pw_stood[index] + 1)
+            self._pw_recent[index].append(cmd)
+        self._pw_stood = (stood[0], stood[1])
+
         # ── price window ───────────────────────────────────────────────────
         # During forecast price spikes the price window's decision replaces the EMHASS
         # setpoints, and everything below runs as it does for a plan: the same Voltx /
@@ -933,25 +961,87 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             pw_changed = pw_action != self._pw_last_action
             self._pw_last_action = pw_action
             _, pw_max_discharge, pw_max_charge = self._pw_batteries()
-            # In the native handoff prev_cmd is 0 while Voltx is in fact working.  Seed it
-            # from the measured power so the uncontrolled grid estimate (here and in
-            # compute_voltx_command) is right on the tick the handoff ends; if the
-            # handoff continues, its branch below zeroes prev_cmd again.
-            if self._sc_state.active and voltx_power_raw is not None:
-                self._prev_cmd = voltx_power_raw
             ev_power = 0.0
             if ev_active:
                 ev_power = max(0.0, _float(hass, str(self._opt(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)), 0.0))
-            grid_target, mpc_batt_cmd = window_setpoints(
-                pw_action,
-                grid_uncontrolled=grid_actual + self._prev_cmd + self._solax_last_written_cmd,
-                export_limit=self._export_limit,
-                import_limit=self._import_limit,
-                headroom_reserve=ev_reserve,
-                max_discharge=pw_max_discharge,
-                max_charge=pw_max_charge,
-                ev_power=ev_power,
-            )
+
+            # What each battery may be doing.  A battery is somewhere among its commands
+            # of the last PRICE_WINDOW_SETTLE_MAX_TICKS (the Voltx took 18 to 38 s to
+            # respond on 2026-10-12).  The Voltx's power reading narrows that to the
+            # reading itself once its command has stood for the meter to catch up; the
+            # Solax has no power reading.
+            voltx_stood, solax_stood = self._pw_stood
+            solax_cmd_now = self._solax_last_written_cmd
+            voltx_done = voltx_stood >= PRICE_WINDOW_SETTLE_MAX_TICKS
+            solax_low, solax_high = min(self._pw_recent[1]), max(self._pw_recent[1])
+            if voltx_power_raw is not None:
+                voltx_low = voltx_high = voltx_power_raw
+                if not voltx_done:
+                    voltx_low = min(voltx_power_raw, self._prev_cmd)
+                    voltx_high = max(voltx_power_raw, self._prev_cmd)
+            else:
+                voltx_low, voltx_high = min(self._pw_recent[0]), max(self._pw_recent[0])
+            # The meter needs a couple of ticks to show a command.
+            readings_current = min(voltx_stood, solax_stood) >= PRICE_WINDOW_SETTLE_MIN_TICKS
+
+            # In the native handoff prev_cmd is 0 while the Voltx is in fact carrying the
+            # house.  Once that has stood, seed prev_cmd from the reading so the grid
+            # clamps in compute_voltx_command and the Solax maths are right on the tick
+            # the handoff ends; if the handoff continues, its branch zeroes it again.
+            if self._sc_state.active and voltx_done and voltx_power_raw is not None:
+                self._prev_cmd = voltx_power_raw
+
+            if pw_changed or self._pw_setpoint is None:
+                # First tick of an action: one direct step from the uncontrolled grid
+                # power (the meter plus what the batteries are doing).  Where commanded
+                # and seen disagree, either may be the stale one, so take whichever
+                # keeps the step inside the limit this action works at.
+                candidates = [grid_actual + v + x for v in (voltx_low, voltx_high) for x in (solax_low, solax_high)]
+                if pw_action == ACTION_CHARGE:
+                    grid_uncontrolled = max(candidates)
+                elif pw_action == ACTION_EXPORT:
+                    grid_uncontrolled = min(candidates)
+                else:
+                    # Hold works at neither limit: take the smallest battery move.
+                    grid_uncontrolled = min(candidates, key=lambda unc: abs(unc - ev_power))
+                grid_target, mpc_batt_cmd = window_setpoints(
+                    pw_action,
+                    grid_uncontrolled=grid_uncontrolled,
+                    export_limit=self._export_limit,
+                    import_limit=self._import_limit,
+                    headroom_reserve=ev_reserve,
+                    max_discharge=pw_max_discharge,
+                    max_charge=pw_max_charge,
+                    ev_power=ev_power,
+                )
+            else:
+                # Same action as last tick: move only on what the meter reads, and do
+                # not ask again for power that is commanded but not yet seen.
+                grid_target = {
+                    ACTION_EXPORT: -self._export_limit,
+                    ACTION_CHARGE: self._import_limit - ev_reserve,
+                }.get(pw_action, ev_power)
+                mpc_batt_cmd = track_setpoint(
+                    pw_action,
+                    # From what is actually commanded, not from the last setpoint: a
+                    # deadband or clamp downstream may have held part of that back, and
+                    # asking for it twice would overshoot.
+                    self._prev_cmd + solax_cmd_now,
+                    grid_actual=grid_actual,
+                    grid_target=grid_target,
+                    readings_current=readings_current,
+                    # A Voltx command that has stood is as delivered as it will get: a
+                    # shortfall against its reading is under-delivery to make up, not
+                    # power still on its way.
+                    pending_discharge=(0.0 if voltx_done else self._prev_cmd - voltx_low)
+                    + (solax_cmd_now - solax_low),
+                    pending_charge=(0.0 if voltx_done else voltx_high - self._prev_cmd)
+                    + (solax_high - solax_cmd_now),
+                    ramp_step=self._ramp_step,
+                    max_discharge=pw_max_discharge,
+                    max_charge=pw_max_charge,
+                )
+            self._pw_setpoint = mpc_batt_cmd
             plan_is_stale = False
             transient_active = False
             effective_target = grid_target
@@ -1075,7 +1165,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 mon_load_reserve=mon_load_reserve,
                 transient_active=transient_active,
                 solax_on=solax_on,
-                ramp_step=float("inf") if pw_changed else self._ramp_step,
+                ramp_step=float("inf") if pw_action is not None else self._ramp_step,
                 tier2_gain=0.0 if pw_action is not None else self._tier2_gain,
                 allow_grid_priority=pw_action is None,
             )
@@ -1158,9 +1248,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # battery.  The ev headroom_reserve still tightens cmd_floor so both batteries ramp
         # down charging — and discharge if required — to protect the import-headroom ceiling.
         effective_tier2_gain = 0.0 if (ev_active or pw_action is not None) else self._tier2_gain
-        # On the tick a price window decision changes, the new setpoint is commanded
-        # directly: a 5-minute spike cannot wait 30 s for the ramp.
-        ramp_step = float("inf") if pw_changed else self._ramp_step
+        # A price window setpoint is commanded directly: a 5-minute spike cannot wait 30 s
+        # for the ramp, and a cut for a limit must land at once.  Its raises are already
+        # rate-limited by track_setpoint.
+        ramp_step = float("inf") if pw_action is not None else self._ramp_step
         # Voltx's own tier-2 gain shrinks by Solax's tier-2 share; Solax's absolute
         # contribution (solax_tier2_term) is computed below using the same grid_track/
         # effective_target error so the two portions sum to the undivided correction.
@@ -1182,7 +1273,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             export_limit=self._export_limit,
             ramp_step=ramp_step,
             plan_is_stale=plan_is_stale,
-            tracking_deadband=self._tracking_deadband,
+            # (a price window raise is already paced by track_setpoint; holding back the
+            # last few hundred watts would leave export short of the limit for good)
+            tracking_deadband=0.0 if pw_action is not None else self._tracking_deadband,
             headroom_reserve=headroom_reserve,
             tier2_gain=voltx_tier2_gain,
             grid_priority=grid_priority,

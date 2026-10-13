@@ -394,10 +394,17 @@ def test_spike_after_hold_exports_at_once_despite_the_handoff_dwell():
     rig.tick()  # hold: handoff starts, 120 s dwell begins
     rig.states.set(E[CONF_ENTITY_GRID_POWER], 0)
     rig.states.set(E[CONF_ENTITY_VOLTX_BATTERY_POWER], 800)  # Voltx carrying the house
+    for _ in range(6):  # a minute of hold: the readings are settled and can be trusted
+        held = rig.tick()
     rig.prices((10.48, 0.64, 10.0))
     data = rig.tick()
     assert data.price_window.action == "export"
-    assert data.voltx_command == 9000 and data.solax_command == 1800
+    # Full export on the first tick: the limit, plus what the batteries already carry
+    # (Voltx 800 W measured, and the Solax following it during the handoff).
+    # The Solax's small following share may or may not be counted, depending on how
+    # long its command has stood.
+    assert held.solax_command > 0
+    assert 10800 <= data.voltx_command + data.solax_command <= 10800 + held.solax_command + 2
 
 
 def test_hold_while_the_ev_charges_keeps_the_house_off_the_grid():
@@ -486,3 +493,161 @@ def test_unreadable_maximum_charge_buy_price_helper_blocks_charging():
     assert data.price_window.code == "hold_charge_too_dear"
     assert "cannot be read" in data.price_window.sentence
     assert data.grid_target == 0
+
+
+# ── never over the grid limits while the batteries or the meter catch up ──────
+
+
+def _grid(rig, watts, voltx_power=None):
+    rig.states.set(E[CONF_ENTITY_GRID_POWER], watts)
+    if voltx_power is not None:
+        rig.states.set(E[CONF_ENTITY_VOLTX_BATTERY_POWER], voltx_power)
+
+
+def test_export_does_not_climb_while_the_meter_still_shows_the_old_reading():
+    rig = Rig()
+    first = rig.tick()
+    assert (first.voltx_command, first.solax_command) == (9000, 1800)
+    for _ in range(4):  # the Voltx took 18 to 38 s to respond on 2026-10-12
+        data = rig.tick()  # grid still reads 800 W import, Voltx power still 0
+        assert (data.voltx_command, data.solax_command) == (9000, 1800)
+    rig.settle(data)
+    data = rig.tick()
+    assert (data.voltx_command, data.solax_command) == (9000, 1800)
+    assert data.grid_actual == -10000
+
+
+def test_export_over_the_limit_is_cut_on_the_next_tick():
+    rig = Rig()
+    rig.settle(rig.tick())
+    _grid(rig, -11500)  # a 1.5 kW load switched off
+    data = rig.tick()
+    # At least the full 1.5 kW excess comes off at once (the Voltx export ceiling takes
+    # it all while the Solax also sheds its share: slightly more, on the safe side).
+    assert 9000 <= data.voltx_command + data.solax_command <= 9300
+
+
+def test_export_makes_up_for_a_voltx_that_under_delivers_without_overshooting():
+    rig = Rig()
+    data = rig.tick()
+    worst = 0.0
+    for _ in range(20):
+        delivered = max(0.0, data.voltx_command - 500)  # Voltx gives 500 W less than asked
+        _grid(rig, 800 - delivered - data.solax_command, voltx_power=delivered)
+        data = rig.tick()
+        worst = min(worst, data.grid_actual)
+    assert worst >= -10000 - 1
+    assert data.grid_actual == pytest.approx(-10000, abs=50)
+
+
+def test_a_quick_return_to_export_does_not_trust_readings_from_the_last_export():
+    rig = Rig()
+    rig.settle(rig.tick())  # exporting at the limit, Voltx measured at 9000 W
+    rig.prices((0.17, 10.0, 10.0), high=12.0)
+    rig.tick()  # hold
+    _grid(rig, 0)  # the meter has caught up; the Voltx power reading has not (still 9000)
+    rig.prices((10.48, 0.64, 10.0))
+    data = rig.tick()
+    assert data.price_window.action == "export"
+    # True uncontrolled load is 800 W: anything over 10 800 W would export past the limit.
+    assert data.voltx_command + data.solax_command <= 10800
+
+
+def test_charge_does_not_climb_while_the_meter_still_shows_the_old_reading():
+    rig = _short_rig()
+    first = rig.tick()
+    total = first.voltx_command + first.solax_command
+    assert total == pytest.approx(-11200, abs=2)
+    for _ in range(4):
+        data = rig.tick()
+        assert data.voltx_command + data.solax_command == pytest.approx(total, abs=2)
+
+
+def test_hold_with_the_ev_does_not_swing_to_charging_while_the_meter_lags():
+    rig = Rig()
+    rig.states.set(EV, 7000)
+    _grid(rig, 7800)
+    rig.tick()  # export step; the meter does not move yet
+    data = rig.tick()
+    _grid(rig, 7800 - data.voltx_command - data.solax_command, voltx_power=data.voltx_command)
+    rig.prices((0.17, 10.0, 10.0), high=12.0)
+    data = rig.tick()  # hold: the batteries step down to the house load
+    assert data.price_window.action == "hold"
+    held = data.voltx_command + data.solax_command
+    assert held == pytest.approx(800, abs=2)
+    data = rig.tick()  # the meter still shows the export
+    assert data.voltx_command + data.solax_command == pytest.approx(held, abs=2)
+
+
+# ── closed loop: slow batteries, lagging readings, quick changes of decision ──
+
+HOUSE = 800.0
+EXPORT_PRICES = (10.48, 0.64, 10.0)
+HOLD_PRICES = (0.17, 10.0, 10.0)
+
+
+def _closed_loop(rig, script, *, voltx_delay, solax_delay, meter_lag, shortfall=0.0):
+    """Run the rig against batteries that respond late and readings that lag.
+
+    `script` lists the prices for each tick.  The Voltx reaches a command
+    `voltx_delay` ticks after it is written and delivers `shortfall` W less than a
+    discharge command; in the native handoff it carries the house.  The meter and the
+    Voltx power reading show the state `meter_lag` ticks ago.  Returns the true grid
+    power after each tick.
+    """
+    voltx_cmds, solax_cmds, truth = [0.0], [0.0], [(HOUSE, 0.0)]
+    grids = []
+    for prices in script:
+        rig.prices(prices, high=12.0 if prices is HOLD_PRICES else None)
+        seen_grid, seen_voltx = truth[max(0, len(truth) - 1 - meter_lag)]
+        _grid(rig, seen_grid, voltx_power=seen_voltx)
+        data = rig.tick()
+        voltx_cmds.append(None if rig.c._sc_state.active else data.voltx_command)
+        solax_cmds.append(data.solax_command)
+        solax = solax_cmds[max(0, len(solax_cmds) - 1 - solax_delay)]
+        asked = voltx_cmds[max(0, len(voltx_cmds) - 1 - voltx_delay)]
+        if asked is None:
+            voltx = HOUSE - solax  # native self-consumption
+        else:
+            voltx = asked - shortfall if asked > shortfall else asked
+        truth.append((HOUSE - voltx - solax, voltx))
+        grids.append(truth[-1][0])
+    return grids
+
+
+@pytest.mark.parametrize("voltx_delay", [0, 1, 3, 4])
+@pytest.mark.parametrize("solax_delay", [0, 2])
+@pytest.mark.parametrize("meter_lag", [0, 1, 2])
+@pytest.mark.parametrize("shortfall", [0.0, 500.0])
+def test_export_never_passes_the_limit_and_still_reaches_it(voltx_delay, solax_delay, meter_lag, shortfall):
+    grids = _closed_loop(
+        Rig(), [EXPORT_PRICES] * 40,
+        voltx_delay=voltx_delay, solax_delay=solax_delay, meter_lag=meter_lag, shortfall=shortfall,
+    )
+    assert min(grids) >= -10000 - 20  # whole-watt command rounding
+    assert grids[-1] == pytest.approx(-10000, abs=100)
+
+
+@pytest.mark.parametrize("voltx_delay", [0, 1, 3])
+@pytest.mark.parametrize("meter_lag", [0, 1, 2])
+@pytest.mark.parametrize("hold_ticks", [1, 2, 7])
+def test_export_hold_export_never_passes_the_limit(voltx_delay, meter_lag, hold_ticks):
+    # After a minute of hold the readings are settled and export is back at the limit
+    # within a few ticks.  After a hold of seconds the first step is a cautious one
+    # (commanded and measured power disagree) and the rest is made up at the ramp.
+    recovery = 20 if hold_ticks >= 7 else 60
+    script = [EXPORT_PRICES] * 6 + [HOLD_PRICES] * hold_ticks + [EXPORT_PRICES] * recovery
+    grids = _closed_loop(Rig(), script, voltx_delay=voltx_delay, solax_delay=1, meter_lag=meter_lag)
+    assert min(grids) >= -10000 - 20  # whole-watt command rounding
+    assert grids[-1] == pytest.approx(-10000, abs=100)
+
+
+@pytest.mark.parametrize("voltx_delay", [0, 1, 3])
+@pytest.mark.parametrize("meter_lag", [0, 1, 2])
+def test_charge_never_passes_the_import_limit(voltx_delay, meter_lag):
+    rig = _short_rig()
+    grids = _closed_loop(
+        rig, [(0.17, 9.80, 10.20)] * 12, voltx_delay=voltx_delay, solax_delay=1, meter_lag=meter_lag,
+    )
+    assert max(grids) <= 12000 + 20
+    assert grids[-1] == pytest.approx(12000, abs=100)

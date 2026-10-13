@@ -534,3 +534,43 @@ def split_setpoint(
     a = max(-a_max_charge, min(a_max_discharge, total - b))
     b = max(-b_max_charge, min(b_max_discharge, total - a))
     return a, b
+
+
+def track_setpoint(
+    action: str,
+    prev_setpoint: float,
+    *,
+    grid_actual: float,
+    grid_target: float,
+    readings_current: bool,
+    pending_discharge: float,
+    pending_charge: float,
+    ramp_step: float,
+    max_discharge: float,
+    max_charge: float,
+) -> float:
+    """The combined battery setpoint for a tick on which the action has not changed.
+
+    The first tick of an action steps straight to `window_setpoints`.  After that the
+    setpoint moves only on what the meter reads, never on what was commanded: while
+    the batteries or the meter are still catching up with a step, "grid + commanded"
+    overstates the load and would drive the batteries past the grid limit.
+
+    - Past the limit the action is working at (over the export limit when exporting,
+      over the import limit when charging): cut by the full excess at once.
+    - Short of the target: close the gap by at most `ramp_step`, less whatever has
+      been commanded in that direction and not yet seen (`pending_discharge` /
+      `pending_charge`, W), and only when `readings_current` (the meter has had time
+      to show the last command).
+    """
+    error = grid_actual - grid_target  # + = more discharge wanted
+    urgent = (action == ACTION_EXPORT and error < 0) or (action == ACTION_CHARGE and error > 0)
+    if urgent:
+        step = error
+    elif not readings_current:
+        step = 0.0
+    elif error > 0:
+        step = min(ramp_step, max(0.0, error - max(0.0, pending_discharge)))
+    else:
+        step = -min(ramp_step, max(0.0, -error - max(0.0, pending_charge)))
+    return max(-max_charge, min(max_discharge, prev_setpoint + step))

@@ -93,6 +93,12 @@ DEFAULT_PW_MIN_SELL_PRICE = 0.30         # $/kWh — never export below this ins
 DEFAULT_PW_CHARGE_RATIO = 1.5            # required margin of predicted sell over effective buy cost
 DEFAULT_PW_ROUND_TRIP_EFFICIENCY = 0.85  # fraction — matches the EMHASS add-on's ~85%
 PRICE_WINDOW_STALE_MINUTES = 10          # Amber Express data older than this → stand down
+# Price window settle bookkeeping.  A battery command "stands" while it stays within the
+# tolerance.  The meter is believed MIN ticks after the commands last moved; a command is
+# taken as delivered after MAX ticks (60 s; the Voltx has taken 18 to 38 s to respond).
+PRICE_WINDOW_SETTLE_TOLERANCE_W = 1
+PRICE_WINDOW_SETTLE_MIN_TICKS = 2
+PRICE_WINDOW_SETTLE_MAX_TICKS = 6
 
 # Options-flow fields for the price window step, in display order, with their defaults
 # as text.  Blank means "not set".

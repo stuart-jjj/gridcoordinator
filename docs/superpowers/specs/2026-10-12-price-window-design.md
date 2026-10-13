@@ -372,8 +372,20 @@ A fresh review of the finished branch found three things that are now fixed, eac
 - **A maximum charge buy price that cannot be read blocks charging.** This is the one exception to "an unreadable setting falls back to its default": the default is no cap, and losing the cap silently would allow buying at any price. The reason reads `hold_charge_too_dear` and says the setting cannot be read. A blank setting still means no cap.
 - **An interval that will never be sold into is not charged for.** A flagged interval whose top-of-range price is under the minimum sell price no longer counts as unserved.
 
-One finding is not fixed and must be settled before shadow mode is turned off: see "Open before going live" below.
+### Staying inside the grid limits (agreed 2026-10-13)
 
-### Open before going live
+The review also found that the first design could pass the export or import limit for a tick or more after a change of decision: it re-anchored the setpoint every tick on "grid reading + last commanded battery power", which overstates the load while the batteries or the meter are still catching up. Keeping export at or under 10 kW is the coordinator's overriding purpose, so the control is now:
 
-The battery setpoint is anchored on the grid reading plus the last *commanded* battery power. If the batteries take longer than one tick to respond (the Voltx took 18 to 38 s on 2026-10-12), the next ticks see a grid reading that does not yet include the step, and the command rises to the batteries' maximum. When they respond, export overshoots the limit (about 12.2 kW against 10 kW in the review's test; about 13.4 kW import against 12 kW when charging) until the next reading corrects it. Anchoring on *measured* battery power would remove the overshoot but would also stop the controller making up for a Voltx that delivers less than commanded, and the Solax has no measured-power entity configured. The choice needs the first shadow event's data.
+1. **One direct step.** On the tick the action changes, the setpoint is computed once from the uncontrolled grid power and sent without the ramp. Each battery's actual output is taken to be somewhere between its power reading and its commands of the last 60 s (the Solax has no power reading, so its commands alone). Where that leaves a range, the step uses the end that keeps it inside the limit the action works at: the smallest export, or the smallest import when charging.
+2. **Then only the meter.** On later ticks the setpoint moves from the commands actually written, by what the meter reads:
+   - over the limit (export limit when exporting, import limit when charging): cut by the full excess at once;
+   - short of the target: raised by at most the normal ramp step, less any power already commanded in that direction and not yet seen, and only once the commands have stood for two ticks so the meter can show them.
+3. **A command that has stood for 60 s is taken as delivered.** A Voltx that then still reads low is under-delivering, and the shortfall is made up.
+
+The ramp and the tracking deadband are off on every price window tick; the pacing above replaces them.
+
+**What it costs.** After a hold of a minute or more, export is back at the limit on the first tick (within the Solax's small share). After a hold of only seconds, commanded and measured power disagree, the first step is a cautious one and the rest is made up at about 500 W per tick. Making up for an under-delivering Voltx starts after 60 s.
+
+**What it cannot do.** A 10 s loop cannot react inside a tick: a load switching off while exporting at the limit shows as an overshoot until the next tick, as it does today. The inverter's own meter export limit is the backstop for that.
+
+**How it is tested.** A closed-loop simulation runs the real tick against batteries that respond 0 to 40 s late, a meter that lags 0 to 20 s, a Voltx that delivers 500 W less than asked, and export, hold, export sequences with holds of 10 s to 70 s. In every case export stays within 20 W of the limit (whole-watt rounding) and returns to it; the same for the import limit when charging.

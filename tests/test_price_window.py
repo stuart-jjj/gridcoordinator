@@ -17,6 +17,7 @@ from custom_components.grid_coordinator.price_window import (
     decision_attributes,
     parse_amber_express,
     split_setpoint,
+    track_setpoint,
     window_setpoints,
 )
 
@@ -547,3 +548,61 @@ def test_split_gives_the_second_battery_what_the_first_cannot_deliver():
     assert split_setpoint(12500.0, 0.1, **_SPLIT) == pytest.approx((10000.0, 2500.0))
     empty = dict(_SPLIT, a_max_discharge=0.0)
     assert split_setpoint(10800.0, 1 / 6, **empty) == pytest.approx((0.0, 3000.0))
+
+
+# ── tracking after the first step ─────────────────────────────────────────────
+
+_TRACK = dict(ramp_step=1500.0, max_discharge=13000.0, max_charge=12600.0,
+              pending_discharge=0.0, pending_charge=0.0)
+
+
+def test_tracking_does_not_raise_export_until_the_batteries_have_settled():
+    # The meter still reads the pre-step value: 10.8 kW "short".  Not evidence yet.
+    assert track_setpoint(ACTION_EXPORT, 10800.0, grid_actual=800.0, grid_target=-10000.0,
+                          readings_current=False, **_TRACK) == 10800.0
+
+
+def test_tracking_cuts_export_over_the_limit_at_once_even_when_unsettled():
+    assert track_setpoint(ACTION_EXPORT, 10800.0, grid_actual=-12200.0, grid_target=-10000.0,
+                          readings_current=False, **_TRACK) == 8600.0
+
+
+def test_tracking_raises_export_by_at_most_the_ramp_once_settled():
+    assert track_setpoint(ACTION_EXPORT, 10800.0, grid_actual=-9500.0, grid_target=-10000.0,
+                          readings_current=True, **_TRACK) == 11300.0
+    assert track_setpoint(ACTION_EXPORT, 8000.0, grid_actual=-5000.0, grid_target=-10000.0,
+                          readings_current=True, **_TRACK) == 9500.0
+
+
+def test_tracking_cuts_charging_over_the_import_limit_at_once():
+    assert track_setpoint(ACTION_CHARGE, -11200.0, grid_actual=13400.0, grid_target=12000.0,
+                          readings_current=False, **_TRACK) == -9800.0
+
+
+def test_tracking_does_not_raise_charging_until_settled():
+    assert track_setpoint(ACTION_CHARGE, -11200.0, grid_actual=800.0, grid_target=12000.0,
+                          readings_current=False, **_TRACK) == -11200.0
+    assert track_setpoint(ACTION_CHARGE, -9000.0, grid_actual=9000.0, grid_target=12000.0,
+                          readings_current=True, **_TRACK) == -10500.0
+
+
+def test_tracking_hold_moves_only_when_settled_and_by_the_ramp():
+    assert track_setpoint(ACTION_HOLD, 800.0, grid_actual=-9000.0, grid_target=0.0,
+                          readings_current=False, **_TRACK) == 800.0
+    assert track_setpoint(ACTION_HOLD, 800.0, grid_actual=400.0, grid_target=0.0,
+                          readings_current=True, **_TRACK) == 1200.0
+
+
+def test_tracking_stays_within_what_the_batteries_can_do():
+    assert track_setpoint(ACTION_EXPORT, 12500.0, grid_actual=-8000.0, grid_target=-10000.0,
+                          readings_current=True, **_TRACK) == 13000.0
+
+
+def test_tracking_does_not_ask_again_for_power_already_on_its_way():
+    # 2 kW short, but 1.8 kW of discharge was commanded and has not shown up yet.
+    waiting = dict(_TRACK, pending_discharge=1800.0)
+    assert track_setpoint(ACTION_EXPORT, 10800.0, grid_actual=-8000.0, grid_target=-10000.0,
+                          readings_current=True, **waiting) == 11000.0
+    waiting = dict(_TRACK, pending_charge=3000.0)
+    assert track_setpoint(ACTION_CHARGE, -11200.0, grid_actual=9000.0, grid_target=12000.0,
+                          readings_current=True, **waiting) == -11200.0
