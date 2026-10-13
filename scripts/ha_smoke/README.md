@@ -18,13 +18,13 @@ Runs the integration against a **real Home Assistant core** (the version pinned 
 scripts/ha_smoke/run
 ```
 
-Expected tail (12 smoke scenarios plus the repo's unit suite on real HA; counts grow as tests are added):
+Expected tail (30 smoke scenarios plus the repo's unit suite on real HA; counts grow as tests are added):
 
 ```
 == existing unit suite on real HA
-163 passed in 0.6s
+235 passed in 0.9s
 == smoke tests
-... 12 passed ...
+... 30 passed ...
 == unit suite rc=0   smoke rc=0
 ```
 
@@ -66,6 +66,9 @@ config entry for `grid_coordinator`, and drives the real coordinator:
 - The real options flow: the dwell option appears with its default, the options removed in 2026.10.2
   are absent, the schema serialises the way the frontend does it, values save into `entry.options`;
   an entry still carrying the removed option keys loads and works.
+- Price window: a spike exports through the real tick and writes the Voltx setpoint; the four
+  sensors and the reason sensor's attributes; shadow mode reports without controlling; the
+  options flow's Price Window step saves literals and entity IDs, and a cleared field is stored blank.
 
 It also re-runs the repo's own unit suite against real HA instead of the stubs.
 
