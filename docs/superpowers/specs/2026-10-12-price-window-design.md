@@ -254,6 +254,7 @@ three layers.
 | `data_stale` | Amber Express data missing or old |
 | `export_allocated` | Current interval is among those the surplus can serve |
 | `export_unconfirmed` | Current interval not yet confirmed; served on its high bound |
+| `export_carried` | Export continuing for up to 30 s through a brief hold or a gap in the price data (added 2026-10-13) |
 | `hold_below_min_price` | Current price is under the minimum sell price |
 | `hold_outranked` | Surplus is reserved for higher-priced intervals |
 | `hold_no_surplus` | The house reserve takes all usable energy |
@@ -379,12 +380,14 @@ The review also found that the first design could pass the export or import limi
 1. **One direct step.** On the tick the action changes, the setpoint is computed once from the uncontrolled grid power and sent without the ramp. Each battery's actual output is taken to be somewhere between its power reading and its commands of the last 60 s (the Solax has no power reading, so its commands alone). Where that leaves a range, the step uses the end that keeps it inside the limit the action works at: the smallest export, or the smallest import when charging.
 2. **Then only the meter.** On later ticks the setpoint moves from the commands actually written, by what the meter reads:
    - over the limit (export limit when exporting, import limit when charging): cut by the full excess at once;
-   - short of the target: raised by at most the normal ramp step, less any power already commanded in that direction and not yet seen, and only once the commands have stood for two ticks so the meter can show them.
+   - short of the target: raised, less any power already commanded in that direction and not yet seen, and only once the commands have stood for two ticks so the meter can show them. When the Voltx reads what it was last told (within 300 W) the whole remaining gap is closed at once; otherwise the raise is capped at the normal ramp step.
 3. **A command that has stood for 60 s is taken as delivered.** A Voltx that then still reads low is under-delivering, and the shortfall is made up.
 
 The ramp and the tracking deadband are off on every price window tick; the pacing above replaces them.
 
-**What it costs.** After a hold of a minute or more, export is back at the limit on the first tick (within the Solax's small share). After a hold of only seconds, commanded and measured power disagree, the first step is a cautious one and the rest is made up at about 500 W per tick. Making up for an under-delivering Voltx starts after 60 s.
+**A brief hold does not interrupt export.** Once exporting, a hold or a gap in Amber Express data is reported as `export_carried` and export continues for up to 30 s after the last export decision. A new interval's price takes 20 to 40 s to confirm, and exporting for 30 s at an ordinary price costs cents. Export stops at once for a confirmed price under the minimum sell price, a charge decision, the end of the window, the feature being switched off, the disabled gate or a manual override. A carried decision keeps the shadow setting of the export it follows.
+
+**What it costs.** After a hold of a minute or more, export is back at the limit on the first tick (within the Solax's small share). After a shorter real hold, commanded and measured power disagree, so the first step is a cautious one; the gap is closed in one step once the readings agree, about 60 to 70 s later in the simulation. Making up for an under-delivering Voltx starts after 60 s.
 
 **What it cannot do.** A 10 s loop cannot react inside a tick: a load switching off while exporting at the limit shows as an overshoot until the next tick, as it does today. The inverter's own meter export limit is the backstop for that.
 

@@ -152,6 +152,8 @@ from .const import (
     ENTITY_MON_LOAD_1,
     EV_RELEASE_MARGIN,
     LOGGER,
+    PRICE_WINDOW_AGREE_TOLERANCE_W,
+    PRICE_WINDOW_EXPORT_CARRY_SECONDS,
     PRICE_WINDOW_SETTLE_MAX_TICKS,
     PRICE_WINDOW_SETTLE_MIN_TICKS,
     PRICE_WINDOW_SETTLE_TOLERANCE_W,
@@ -169,6 +171,8 @@ from .price_window import (
     ACTION_HOLD,
     CODE_DATA_STALE,
     CODE_DISABLED,
+    CODE_EXPORT_CARRIED,
+    CODE_HOLD_BELOW_MIN_PRICE,
     PriceWindowDecision,
     PriceWindowEnergy,
     PriceWindowLimits,
@@ -296,6 +300,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # Combined battery setpoint the price window last asked for (None when it is not
         # in control); see the settle bookkeeping in _async_tick for the rest.
         self._pw_setpoint: float | None = None
+        # When the price window last decided to export by itself (not carried), and
+        # whether that decision was a shadow one; see _carry_export.
+        self._pw_monotonic = time.monotonic
+        self._pw_export_at: float | None = None
+        self._pw_export_shadow: bool = True
         self._pw_stood_cmd: list[float] = [0.0, 0.0]   # Voltx, Solax
         self._pw_stood: tuple[int, int] = (0, 0)
         self._pw_recent: tuple[deque[float], deque[float]] = (
@@ -741,6 +750,44 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         shadow_state = _str(hass, shadow_entity, "on").strip().lower() if shadow_entity else "on"
         return replace(decision, shadow=shadow_state != "off")
 
+    def _carry_export(self, decision: PriceWindowDecision) -> PriceWindowDecision:
+        """Keep exporting through a brief hold or a gap in the price data.
+
+        Restarting export after even a 10 s hold has to be done cautiously (the
+        readings are in flux) and loses most of a 5-minute interval, while exporting
+        for another 30 s at an ordinary price costs cents.  So a hold, or stale data,
+        within PRICE_WINDOW_EXPORT_CARRY_SECONDS of the last export decision is
+        reported and executed as export.  A confirmed price under the minimum sell
+        price stops export at once, as do charge, the end of the window, the feature
+        being switched off, the disabled gate and a manual override.
+        """
+        now = self._pw_monotonic()
+        if decision.action == ACTION_EXPORT:
+            self._pw_export_at = now
+            self._pw_export_shadow = decision.shadow
+            return decision
+        brief_hold = decision.action == ACTION_HOLD and not (
+            decision.code == CODE_HOLD_BELOW_MIN_PRICE and decision.current_confirmed
+        )
+        if (
+            self._pw_export_at is not None
+            and now - self._pw_export_at <= PRICE_WINDOW_EXPORT_CARRY_SECONDS
+            and (brief_hold or decision.code == CODE_DATA_STALE)
+        ):
+            return replace(
+                decision,
+                action=ACTION_EXPORT,
+                code=CODE_EXPORT_CARRIED,
+                sentence=(
+                    f"Still exporting for up to {PRICE_WINDOW_EXPORT_CARRY_SECONDS} s "
+                    f"after the last export decision. Otherwise: {decision.sentence}"
+                ),
+                shadow=self._pw_export_shadow,
+                would_command_w=-self._export_limit,
+            )
+        self._pw_export_at = None
+        return decision
+
     # ── override control ──────────────────────────────────────────────────────
 
     def set_override(
@@ -783,6 +830,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         except Exception:  # noqa: BLE001 — reporting must never take the control loop down
             LOGGER.exception("price window evaluation failed; following EMHASS")
             decision = inactive(CODE_DATA_STALE, "Price window evaluation failed; see the log.")
+        decision = self._carry_export(decision)
         if decision.code != self._pw_last_code:
             LOGGER.info(
                 "price window: %s%s — %s",
@@ -1030,6 +1078,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     grid_actual=grid_actual,
                     grid_target=grid_target,
                     readings_current=readings_current,
+                    readings_agree=(
+                        voltx_power_raw is not None
+                        and abs(voltx_power_raw - self._prev_cmd) <= PRICE_WINDOW_AGREE_TOLERANCE_W
+                    ),
                     # A Voltx command that has stood is as delivered as it will get: a
                     # shortfall against its reading is under-delivery to make up, not
                     # power still on its way.

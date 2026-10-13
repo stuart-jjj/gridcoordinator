@@ -553,7 +553,7 @@ def test_split_gives_the_second_battery_what_the_first_cannot_deliver():
 # ── tracking after the first step ─────────────────────────────────────────────
 
 _TRACK = dict(ramp_step=1500.0, max_discharge=13000.0, max_charge=12600.0,
-              pending_discharge=0.0, pending_charge=0.0)
+              pending_discharge=0.0, pending_charge=0.0, readings_agree=False)
 
 
 def test_tracking_does_not_raise_export_until_the_batteries_have_settled():
@@ -606,3 +606,15 @@ def test_tracking_does_not_ask_again_for_power_already_on_its_way():
     waiting = dict(_TRACK, pending_charge=3000.0)
     assert track_setpoint(ACTION_CHARGE, -11200.0, grid_actual=9000.0, grid_target=12000.0,
                           readings_current=True, **waiting) == -11200.0
+
+
+def test_tracking_closes_the_whole_gap_when_the_readings_agree():
+    agreed = dict(_TRACK, readings_agree=True)
+    assert track_setpoint(ACTION_EXPORT, 1800.0, grid_actual=750.0, grid_target=-10000.0,
+                          readings_current=True, **agreed) == 12550.0
+    # ... still less what is on its way, and still not before the meter can show it.
+    agreed["pending_discharge"] = 1500.0
+    assert track_setpoint(ACTION_EXPORT, 1800.0, grid_actual=750.0, grid_target=-10000.0,
+                          readings_current=True, **agreed) == 11050.0
+    assert track_setpoint(ACTION_EXPORT, 1800.0, grid_actual=750.0, grid_target=-10000.0,
+                          readings_current=False, **agreed) == 1800.0

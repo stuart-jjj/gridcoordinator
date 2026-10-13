@@ -152,6 +152,8 @@ class Rig:
 
         self.solax = c._async_write_solax = AsyncMock(side_effect=write_solax)
         self.c = c
+        self.clock = 0.0  # the price window's clock: 10 s a tick
+        c._pw_monotonic = lambda: self.clock
         self._loop = asyncio.new_event_loop()
 
     def prices(self, sell, *, buy=None, high=None, confirmed_first=True, age_s=0.0):
@@ -162,6 +164,7 @@ class Rig:
     def tick(self):
         # A private loop: asyncio.run() leaves the thread with no current event loop on
         # Python 3.14, which breaks later tests when HA's pytest plugins are installed.
+        self.clock += 10.0
         return self._loop.run_until_complete(self.c._async_update_data())
 
     def settle(self, data):
@@ -651,3 +654,57 @@ def test_charge_never_passes_the_import_limit(voltx_delay, meter_lag):
     )
     assert max(grids) <= 12000 + 20
     assert grids[-1] == pytest.approx(12000, abs=100)
+
+
+# ── a brief hold does not interrupt export ────────────────────────────────────
+
+
+def test_export_carries_on_through_a_hold_on_an_unconfirmed_price():
+    rig = Rig()
+    first = rig.tick()
+    rig.settle(first)
+    rig.prices(HOLD_PRICES, confirmed_first=False)  # new interval at 17c, not confirmed yet
+    for _ in range(3):  # 30 s
+        data = rig.tick()
+        assert data.price_window.action == "export"
+        assert data.price_window.code == "export_carried"
+        assert "Still exporting" in data.price_window.sentence
+        assert (data.voltx_command, data.solax_command) == (first.voltx_command, first.solax_command)
+    data = rig.tick()  # 40 s: the hold is real
+    assert data.price_window.action == "hold"
+
+
+def test_export_stops_at_once_for_a_confirmed_price_under_the_minimum():
+    rig = Rig()
+    rig.settle(rig.tick())
+    rig.prices(HOLD_PRICES, high=12.0)  # 17c, confirmed
+    data = rig.tick()
+    assert (data.price_window.action, data.price_window.code) == ("hold", "hold_below_min_price")
+
+
+def test_export_carries_on_through_a_gap_in_amber_express_data():
+    rig = Rig()
+    first = rig.tick()
+    rig.settle(first)
+    rig.states.set(FEED, "unavailable")
+    data = rig.tick()
+    assert data.price_window.code == "export_carried"
+    assert (data.voltx_command, data.solax_command) == (first.voltx_command, first.solax_command)
+    for _ in range(3):
+        data = rig.tick()
+    assert data.price_window.code == "data_stale"  # after 30 s it stands down
+
+
+def test_a_carried_export_in_shadow_still_does_not_control():
+    rig = Rig(shadow="on")
+    rig.tick()
+    rig.states.set(FEED, "unavailable")
+    data = rig.tick()
+    assert data.price_window.code == "export_carried"
+    assert data.price_window.shadow is True
+    assert data.grid_target == 0  # the EMHASS plan
+
+
+def test_no_carry_without_a_recent_export():
+    rig = Rig(sell=HOLD_PRICES, confirmed_first=False)
+    assert rig.tick().price_window.action == "hold"

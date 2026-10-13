@@ -25,6 +25,7 @@ CODE_NO_WINDOW = "no_window"
 CODE_DATA_STALE = "data_stale"
 CODE_EXPORT_ALLOCATED = "export_allocated"
 CODE_EXPORT_UNCONFIRMED = "export_unconfirmed"
+CODE_EXPORT_CARRIED = "export_carried"
 CODE_HOLD_BELOW_MIN_PRICE = "hold_below_min_price"
 CODE_HOLD_OUTRANKED = "hold_outranked"
 CODE_HOLD_NO_SURPLUS = "hold_no_surplus"
@@ -543,6 +544,7 @@ def track_setpoint(
     grid_actual: float,
     grid_target: float,
     readings_current: bool,
+    readings_agree: bool,
     pending_discharge: float,
     pending_charge: float,
     ramp_step: float,
@@ -561,7 +563,9 @@ def track_setpoint(
     - Short of the target: close the gap by at most `ramp_step`, less whatever has
       been commanded in that direction and not yet seen (`pending_discharge` /
       `pending_charge`, W), and only when `readings_current` (the meter has had time
-      to show the last command).
+      to show the last command).  When `readings_agree` (the Voltx reads what it was
+      last told) the meter is as good as it was for the first step, and the whole
+      gap is closed at once.
     """
     error = grid_actual - grid_target  # + = more discharge wanted
     urgent = (action == ACTION_EXPORT and error < 0) or (action == ACTION_CHARGE and error > 0)
@@ -569,8 +573,10 @@ def track_setpoint(
         step = error
     elif not readings_current:
         step = 0.0
-    elif error > 0:
-        step = min(ramp_step, max(0.0, error - max(0.0, pending_discharge)))
     else:
-        step = -min(ramp_step, max(0.0, -error - max(0.0, pending_charge)))
+        cap = float("inf") if readings_agree else ramp_step
+        if error > 0:
+            step = min(cap, max(0.0, error - max(0.0, pending_discharge)))
+        else:
+            step = -min(cap, max(0.0, -error - max(0.0, pending_charge)))
     return max(-max_charge, min(max_discharge, prev_setpoint + step))

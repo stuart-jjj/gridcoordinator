@@ -98,6 +98,14 @@ PRICE_WINDOW_STALE_MINUTES = 10          # Amber Express data older than this â†
 # taken as delivered after MAX ticks (60 s; the Voltx has taken 18 to 38 s to respond).
 PRICE_WINDOW_SETTLE_TOLERANCE_W = 1
 PRICE_WINDOW_SETTLE_MIN_TICKS = 2
+# Once exporting, a hold (other than a confirmed price under the minimum sell price) or a
+# gap in Amber Express data does not interrupt the export until it has lasted this long:
+# a new interval's price takes 20 to 40 s to confirm, and restarting export after even a
+# 10 s hold has to be done cautiously and costs most of a 5-minute interval.
+PRICE_WINDOW_EXPORT_CARRY_SECONDS = 30
+# The Voltx reading is "what it was last told" within this; then the meter is trusted
+# for the whole remaining gap instead of one ramp step.
+PRICE_WINDOW_AGREE_TOLERANCE_W = 300
 PRICE_WINDOW_SETTLE_MAX_TICKS = 6
 
 # Options-flow fields for the price window step, in display order, with their defaults
