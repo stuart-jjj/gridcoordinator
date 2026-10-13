@@ -6,9 +6,11 @@ import asyncio
 import math
 import time
 from collections import deque
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime, time as clock_time, timedelta
 from statistics import pstdev
 from typing import TYPE_CHECKING
+from zoneinfo import ZoneInfo
 
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
@@ -35,6 +37,11 @@ from .const import (
     CONF_ENTITY_MPC_BATT_POWER,
     CONF_ENTITY_MPC_GRID_POWER,
     CONF_ENTITY_MON_LOAD_1,
+    CONF_ENTITY_PW_ENABLE,
+    CONF_ENTITY_PW_FEED_IN,
+    CONF_ENTITY_PW_GENERAL,
+    CONF_ENTITY_PW_HOUSE_LOAD,
+    CONF_ENTITY_PW_SHADOW,
     CONF_ENTITY_SOC_MAX,
     CONF_ENTITY_SOC_MIN,
     CONF_ENTITY_SOLAX_CAPACITY,
@@ -72,6 +79,14 @@ from .const import (
     CONF_MPC_BATT_SIGN_INVERTED,
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
+    CONF_PW_CHARGE_RATIO,
+    CONF_PW_LOOKAHEAD_HOURS,
+    CONF_PW_MAX_CHARGE_BUY_PRICE,
+    CONF_PW_MIN_SELL_PRICE,
+    CONF_PW_RESERVE_MARGIN_HOURS,
+    CONF_PW_RESERVE_UNTIL,
+    CONF_PW_ROUND_TRIP_EFFICIENCY,
+    CONF_PW_SPIKE_THRESHOLD,
     CONF_RAMP_STEP,
     CONF_SC_MIN_DWELL_SECONDS,
     CONF_SELF_CONSUMPTION_DEADBAND,
@@ -106,6 +121,12 @@ from .const import (
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_OVERRIDE_DURATION_MINUTES,
     DEFAULT_PLAN_STALE_MINUTES,
+    DEFAULT_PW_CHARGE_RATIO,
+    DEFAULT_PW_LOOKAHEAD_HOURS,
+    DEFAULT_PW_MIN_SELL_PRICE,
+    DEFAULT_PW_RESERVE_MARGIN_HOURS,
+    DEFAULT_PW_ROUND_TRIP_EFFICIENCY,
+    DEFAULT_PW_SPIKE_THRESHOLD,
     DEFAULT_RAMP_STEP,
     DEFAULT_SC_MIN_DWELL_SECONDS,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
@@ -131,6 +152,7 @@ from .const import (
     ENTITY_MON_LOAD_1,
     EV_RELEASE_MARGIN,
     LOGGER,
+    PRICE_WINDOW_STALE_MINUTES,
     SOLAX_EXPORT_DURATION_SAFE,
     SOLAX_RC_MODE_DISABLED,
     SOLAX_RC_MODE_ENABLED,
@@ -138,6 +160,20 @@ from .const import (
     VOLTX_WORK_MODE_CUSTOM,
 )
 from .models import CoordinatorData, CoordinatorMode, SolaxMode
+from .price_window import (
+    ACTION_CHARGE,
+    ACTION_EXPORT,
+    ACTION_HOLD,
+    CODE_DATA_STALE,
+    CODE_DISABLED,
+    PriceWindowDecision,
+    PriceWindowEnergy,
+    PriceWindowLimits,
+    PriceWindowSettings,
+    decide_price_window,
+    inactive,
+    parse_amber_express,
+)
 
 if TYPE_CHECKING:
     from .data import GridCoordinatorConfigEntry
@@ -168,6 +204,33 @@ def _float_or_entity(hass: HomeAssistant, entity_id_or_value: str, default: floa
 def _str(hass: HomeAssistant, entity_id: str, default: str = "") -> str:
     state = hass.states.get(entity_id)
     return state.state if state else default
+
+
+_TRUTHY = ("on", "true", "yes", "1")
+
+_PRICE_WINDOW_MODES = {
+    ACTION_EXPORT: CoordinatorMode.PRICE_WINDOW_EXPORT,
+    ACTION_HOLD: CoordinatorMode.PRICE_WINDOW_HOLD,
+    ACTION_CHARGE: CoordinatorMode.PRICE_WINDOW_CHARGE,
+}
+# Modes that mean "nothing bound": while the price window is in control they are
+# reported as the price window's own mode instead.
+_UNBOUND_MODES = (
+    CoordinatorMode.EMHASS_TRACKING,
+    CoordinatorMode.SELF_CONSUMPTION,
+    CoordinatorMode.STALE_PLAN,
+)
+
+
+def _parse_clock(text: str) -> clock_time | None:
+    """Parse `HH:MM`, `HH:MM:SS` or `YYYY-MM-DD HH:MM:SS` (an input_datetime state)."""
+    text = text.strip()
+    if " " in text:
+        text = text.rsplit(" ", 1)[1]
+    try:
+        return clock_time.fromisoformat(text)
+    except ValueError:
+        return None
 
 
 def _plan_age_minutes(hass: HomeAssistant, entity_id: str) -> float:
@@ -218,6 +281,12 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         self._grid_history: deque[float] = deque(maxlen=window)
         self._grid_ema: float = 0.0
         self._grid_ema_seeded: bool = False
+        # Price window: this tick's decision (None until the first tick), whether it is
+        # in control, and the last action/code so a change is acted on and logged once.
+        self._pw_decision: PriceWindowDecision | None = None
+        self._pw_control: bool = False
+        self._pw_last_action: str | None = None
+        self._pw_last_code: str | None = None
         # Entities already warned about, so a missing control input logs once not 6×/min
         self._warned_missing: set[str] = set()
         super().__init__(
@@ -531,6 +600,129 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             return True
         return state in ("on", "true", "yes", "1")
 
+    # ── price window ──────────────────────────────────────────────────────────
+
+    def _pw_number(self, key: str, default: float) -> float:
+        """A price window setting: a literal, or the state of a helper entity."""
+        value = _float_or_entity(self.hass, str(self._opt(key, default)).strip(), default)
+        return value if math.isfinite(value) else default
+
+    def _pw_optional_number(self, key: str) -> float | None:
+        """Like _pw_number, but blank or unreadable means "not set"."""
+        raw = str(self._opt(key, "")).strip()
+        if not raw:
+            return None
+        value = _float_or_entity(self.hass, raw, float("nan"))
+        return value if math.isfinite(value) else None
+
+    def _pw_clock(self, key: str) -> clock_time | None:
+        """A clock-time setting: `HH:MM`, or an input_datetime entity; blank = not set."""
+        raw = str(self._opt(key, "")).strip()
+        if not raw:
+            return None
+        literal = _parse_clock(raw)
+        if literal is not None:
+            return literal
+        return _parse_clock(_str(self.hass, raw, ""))
+
+    def _pw_settings(self) -> PriceWindowSettings:
+        return PriceWindowSettings(
+            spike_threshold=self._pw_number(CONF_PW_SPIKE_THRESHOLD, DEFAULT_PW_SPIKE_THRESHOLD),
+            lookahead_h=self._pw_number(CONF_PW_LOOKAHEAD_HOURS, DEFAULT_PW_LOOKAHEAD_HOURS),
+            reserve_margin_h=self._pw_number(CONF_PW_RESERVE_MARGIN_HOURS, DEFAULT_PW_RESERVE_MARGIN_HOURS),
+            reserve_until=self._pw_clock(CONF_PW_RESERVE_UNTIL),
+            min_sell_price=self._pw_number(CONF_PW_MIN_SELL_PRICE, DEFAULT_PW_MIN_SELL_PRICE),
+            charge_ratio=self._pw_number(CONF_PW_CHARGE_RATIO, DEFAULT_PW_CHARGE_RATIO),
+            max_charge_buy_price=self._pw_optional_number(CONF_PW_MAX_CHARGE_BUY_PRICE),
+            round_trip_efficiency=self._pw_number(
+                CONF_PW_ROUND_TRIP_EFFICIENCY, DEFAULT_PW_ROUND_TRIP_EFFICIENCY
+            ),
+        )
+
+    def _pw_batteries(self) -> tuple[PriceWindowEnergy, float, float]:
+        """Energy above the SOC floors and the combined power limits of the batteries
+        the coordinator may command.  Returns (energy, max_discharge_w, max_charge_w);
+        the energy's house load is filled in by the caller.
+        """
+        hass = self.hass
+        usable = 0.0
+        max_discharge = 0.0
+        max_charge = 0.0
+        full: list[bool] = []
+        if self._control_enabled(hass, CONF_ENTITY_VOLTX_CONTROL_ENABLE):
+            soc = _float(hass, self._eid(CONF_ENTITY_VOLTX_SOC), 0.0)
+            soc_min = _float(hass, self._eid(CONF_ENTITY_SOC_MIN), 20.0)
+            soc_max = _float(hass, self._eid(CONF_ENTITY_SOC_MAX), 95.0)
+            capacity = _float(hass, self._eid(CONF_ENTITY_VOLTX_CAPACITY), 0.0)
+            usable += capacity * max(0.0, soc - soc_min) / 100
+            max_discharge += _float(hass, self._eid(CONF_ENTITY_VOLTX_MAX_DISCHARGE), 5000.0)
+            max_charge += _float(hass, self._eid(CONF_ENTITY_VOLTX_MAX_CHARGE), 5000.0)
+            full.append(soc >= soc_max)
+        if self._solax_enabled() and self._control_enabled(hass, CONF_ENTITY_SOLAX_CONTROL_ENABLE):
+            soc = _float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), 0.0)
+            soc_min = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0)
+            soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
+            capacity = _float(hass, self._eid(CONF_ENTITY_SOLAX_CAPACITY), 0.0)
+            usable += capacity * max(0.0, soc - soc_min) / 100
+            max_discharge += float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
+            max_charge += float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
+            full.append(soc >= soc_max)
+        energy = PriceWindowEnergy(
+            usable_kwh=usable, house_load_w=0.0, at_soc_ceiling=bool(full) and all(full)
+        )
+        return energy, max_discharge, max_charge
+
+    def _evaluate_price_window(self, now: datetime) -> PriceWindowDecision:
+        """Read Amber Express and the batteries, and decide.  Never raises: anything
+        missing or unreadable returns an inactive decision that says why, and EMHASS
+        tracking carries on.
+        """
+        hass = self.hass
+        enable = str(self._opt(CONF_ENTITY_PW_ENABLE, "")).strip()
+        feed_in = str(self._opt(CONF_ENTITY_PW_FEED_IN, "")).strip()
+        general = str(self._opt(CONF_ENTITY_PW_GENERAL, "")).strip()
+        load = str(self._opt(CONF_ENTITY_PW_HOUSE_LOAD, "")).strip()
+        if not (enable and feed_in and general and load):
+            return inactive(CODE_DISABLED, "Price window is not configured.")
+        if _str(hass, enable, "off").strip().lower() not in _TRUTHY:
+            return inactive(CODE_DISABLED, "Price window is switched off.")
+
+        attrs = []
+        for entity_id in (feed_in, general):
+            state = hass.states.get(entity_id)
+            if state is None or state.state in ("unavailable", "unknown", ""):
+                return inactive(CODE_DATA_STALE, f"{entity_id} is unavailable.")
+            age_min = (now - state.last_updated).total_seconds() / 60
+            if age_min > PRICE_WINDOW_STALE_MINUTES:
+                return inactive(
+                    CODE_DATA_STALE, f"{entity_id} last updated {age_min:.0f} min ago."
+                )
+            attrs.append(state.attributes)
+        house_load = _float(hass, load, float("nan"))
+        if not math.isfinite(house_load):
+            return inactive(CODE_DATA_STALE, f"Expected house load {load} is unavailable.")
+
+        try:
+            local_now = now.astimezone(ZoneInfo(str(hass.config.time_zone)))
+        except Exception:  # noqa: BLE001 — an unknown zone must not stop the control loop
+            local_now = now
+        intervals = parse_amber_express(attrs[0], attrs[1], local_now)
+        energy, _max_discharge, max_charge = self._pw_batteries()
+        decision = decide_price_window(
+            intervals,
+            local_now,
+            replace(energy, house_load_w=house_load),
+            PriceWindowLimits(
+                export_w=self._export_limit, charge_w=min(self._import_limit, max_charge)
+            ),
+            self._pw_settings(),
+        )
+        # Shadow is on unless the shadow entity exists and reads off: a new install
+        # (or a missing helper) reports what it would do without doing it.
+        shadow_entity = str(self._opt(CONF_ENTITY_PW_SHADOW, "")).strip()
+        shadow_state = _str(hass, shadow_entity, "on").strip().lower() if shadow_entity else "on"
+        return replace(decision, shadow=shadow_state != "off")
+
     # ── override control ──────────────────────────────────────────────────────
 
     def set_override(
@@ -562,7 +754,38 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     # ── main loop ─────────────────────────────────────────────────────────────
 
     async def _async_update_data(self) -> CoordinatorData:
-        """Called every UPDATE_INTERVAL_SECONDS by the DataUpdateCoordinator."""
+        """Called every UPDATE_INTERVAL_SECONDS by the DataUpdateCoordinator.
+
+        Evaluates the price window first, so its decision and reason are reported on
+        every tick — including disabled, override and shadow ticks, where it does not
+        control — then runs the tick.
+        """
+        try:
+            decision = self._evaluate_price_window(datetime.now(UTC))
+        except Exception:  # noqa: BLE001 — reporting must never take the control loop down
+            LOGGER.exception("price window evaluation failed; following EMHASS")
+            decision = inactive(CODE_DATA_STALE, "Price window evaluation failed; see the log.")
+        if decision.code != self._pw_last_code:
+            LOGGER.info(
+                "price window: %s%s — %s",
+                decision.code,
+                " (shadow)" if decision.shadow and decision.action else "",
+                decision.sentence,
+            )
+            self._pw_last_code = decision.code
+        self._pw_decision = decision
+        self._pw_control = False
+        data = await self._async_tick()
+        if not self._pw_control:
+            # Not in control this tick (inactive, shadow, disabled gate or a manual
+            # override): the next tick that is counts as a change of decision.
+            self._pw_last_action = None
+        elif data.mode in _UNBOUND_MODES:
+            data = replace(data, mode=_PRICE_WINDOW_MODES[decision.action])
+        return replace(data, price_window=decision)
+
+    async def _async_tick(self) -> CoordinatorData:
+        """One control tick: disabled gate, manual override, price window, EMHASS."""
         hass = self.hass
 
         entity_enabled = self._eid(CONF_ENTITY_ENABLED)
