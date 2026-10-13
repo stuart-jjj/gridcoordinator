@@ -173,6 +173,7 @@ from .price_window import (
     decide_price_window,
     inactive,
     parse_amber_express,
+    window_setpoints,
 )
 
 if TYPE_CHECKING:
@@ -911,6 +912,47 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # EV must be served from the grid with tier 2 off — native self-consumption would
         # drain the battery(ies) into the car — so EV charging keeps the handoff off.
         ev_reserve, ev_active = self._ev_headroom_reserve(hass)
+
+        # ── price window ───────────────────────────────────────────────────
+        # During forecast price spikes the price window's decision replaces the EMHASS
+        # setpoints, and everything below runs as it does for a plan: the same Voltx /
+        # Solax split, grid limits, headroom and SOC limits.  The battery setpoint is
+        # anchored on the uncontrolled grid power, which already reaches the target in
+        # one step, so tier 2 and transient damping are switched off for the tick (the
+        # price window's own steps are not a cycling load), and plan staleness does not
+        # apply because the plan is not being followed.
+        pw = self._pw_decision
+        pw_action = pw.action if (pw is not None and not pw.shadow) else None
+        pw_changed = False
+        if pw_action is not None:
+            self._pw_control = True
+            pw_changed = pw_action != self._pw_last_action
+            self._pw_last_action = pw_action
+            _, pw_max_discharge, pw_max_charge = self._pw_batteries()
+            # In the native handoff prev_cmd is 0 while Voltx is in fact working.  Seed it
+            # from the measured power so the uncontrolled grid estimate (here and in
+            # compute_voltx_command) is right on the tick the handoff ends; if the
+            # handoff continues, its branch below zeroes prev_cmd again.
+            if self._sc_state.active and voltx_power_raw is not None:
+                self._prev_cmd = voltx_power_raw
+            ev_power = 0.0
+            if ev_active:
+                ev_power = max(0.0, _float(hass, str(self._opt(CONF_ENTITY_EV_CHARGER, ENTITY_EV_CHARGER)), 0.0))
+            grid_target, mpc_batt_cmd = window_setpoints(
+                pw_action,
+                grid_uncontrolled=grid_actual + self._prev_cmd + self._solax_last_written_cmd,
+                export_limit=self._export_limit,
+                import_limit=self._import_limit,
+                headroom_reserve=ev_reserve,
+                max_discharge=pw_max_discharge,
+                max_charge=pw_max_charge,
+                ev_power=ev_power,
+            )
+            plan_is_stale = False
+            transient_active = False
+            effective_target = grid_target
+            effective_mpc_batt = mpc_batt_cmd
+
         # Safety conditions bypass the dwell: a limit breach, Voltx control switched off or an
         # EV charging must leave the handoff immediately (the branch has no grid clamp).
         limit_breach = grid_actual > self._import_limit or grid_actual < -self._export_limit
@@ -922,7 +964,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             deadband=self._self_consumption_deadband,
             min_dwell_s=self._sc_min_dwell_seconds,
             force_exit=limit_breach or not voltx_control or ev_active,
-            bypass_lockout=plan_is_stale,
+            # A price window decision takes effect at once: the dwell exists to stop an
+            # EMHASS target hovering at the deadband from flapping, which this cannot do.
+            bypass_lockout=plan_is_stale or pw_action is not None,
         )
         if self._sc_state.active != was_active:
             LOGGER.debug(
@@ -1027,6 +1071,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 mon_load_reserve=mon_load_reserve,
                 transient_active=transient_active,
                 solax_on=solax_on,
+                ramp_step=float("inf") if pw_changed else self._ramp_step,
+                tier2_gain=0.0 if pw_action is not None else self._tier2_gain,
+                allow_grid_priority=pw_action is None,
             )
 
         # grid_priority's deadbeat formula (budget.py) tracks whatever target it's
@@ -1041,7 +1088,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # as the Voltx deadbeat command. The unclamped grid_target (not
         # effective_target) is still what the diagnostic sensor reports, so this
         # doesn't hide what EMHASS actually planned.
-        grid_priority = self._grid_priority_active(hass, effective_target)
+        # (Not during a price window: its setpoint is already deadbeat, and the clamp
+        # below would turn a charge target into zero.)
+        grid_priority = pw_action is None and self._grid_priority_active(hass, effective_target)
         if grid_priority:
             effective_target = min(effective_target, 0.0)
 
@@ -1078,7 +1127,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # target (tier 2 off): the EV load is served by grid import, not by draining the
         # battery.  The ev headroom_reserve still tightens cmd_floor so both batteries ramp
         # down charging — and discharge if required — to protect the import-headroom ceiling.
-        effective_tier2_gain = 0.0 if ev_active else self._tier2_gain
+        effective_tier2_gain = 0.0 if (ev_active or pw_action is not None) else self._tier2_gain
+        # On the tick a price window decision changes, the new setpoint is commanded
+        # directly: a 5-minute spike cannot wait 30 s for the ramp.
+        ramp_step = float("inf") if pw_changed else self._ramp_step
         # Voltx's own tier-2 gain shrinks by Solax's tier-2 share; Solax's absolute
         # contribution (solax_tier2_term) is computed below using the same grid_track/
         # effective_target error so the two portions sum to the undivided correction.
@@ -1098,7 +1150,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             max_discharge=max_discharge,
             import_limit=self._import_limit,
             export_limit=self._export_limit,
-            ramp_step=self._ramp_step,
+            ramp_step=ramp_step,
             plan_is_stale=plan_is_stale,
             tracking_deadband=self._tracking_deadband,
             headroom_reserve=headroom_reserve,
@@ -1314,6 +1366,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         mon_load_reserve: float,
         transient_active: bool,
         solax_on: bool,
+        ramp_step: float,
+        tier2_gain: float,
+        allow_grid_priority: bool,
     ) -> CoordinatorData:
         """One tick when Voltx (primary) control is switched off.
 
@@ -1343,7 +1398,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             solax_max_charge = float(self._opt(CONF_SOLAX_MAX_CHARGE, DEFAULT_SOLAX_MAX_CHARGE))
             solax_max_discharge = float(self._opt(CONF_SOLAX_MAX_DISCHARGE, DEFAULT_SOLAX_MAX_DISCHARGE))
-            grid_priority = self._grid_priority_active(hass, effective_target)
+            grid_priority = allow_grid_priority and self._grid_priority_active(hass, effective_target)
             # See the equivalent clamp in the Voltx-enabled path (async_update_data):
             # the entity-driven trigger can fire while EMHASS's grid_target is still
             # positive, and deadbeat tracking must never chase that into an import.
@@ -1352,7 +1407,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if grid_priority:
                 effective_target = min(effective_target, 0.0)
             # Tier 2 still off during EV (its load is served by grid import, not the battery).
-            effective_tier2_gain = 0.0 if ev_active else self._tier2_gain
+            effective_tier2_gain = 0.0 if ev_active else tier2_gain
             solax_cmd, s_mode, _diag = compute_voltx_command(
                 grid_actual=grid_actual,
                 grid_target=effective_target,
@@ -1365,7 +1420,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 max_discharge=solax_max_discharge,
                 import_limit=self._import_limit,
                 export_limit=self._export_limit,
-                ramp_step=self._ramp_step,
+                ramp_step=ramp_step,
                 plan_is_stale=plan_is_stale,
                 tracking_deadband=self._tracking_deadband,
                 headroom_reserve=headroom_reserve,

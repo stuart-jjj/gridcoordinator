@@ -331,3 +331,116 @@ def test_each_change_of_reason_code_is_logged_once(caplog):
     assert len(lines) == 2
     assert lines[0].startswith("price window: export_allocated — Exporting: $10.48 now")
     assert lines[1].startswith("price window: hold_below_min_price")
+
+
+# ── export ────────────────────────────────────────────────────────────────────
+
+
+def test_export_commands_both_batteries_on_the_first_tick():
+    rig = Rig()
+    data = rig.tick()
+    assert data.price_window.code == "export_allocated"
+    assert data.grid_target == -10000
+    # 800 W of house plus 10 kW of export, split by capacity: no ramp from zero.
+    assert data.voltx_command == 9000
+    assert data.solax_command == 1800
+    assert data.solax_mode == SolaxMode.FORCE_DISCHARGE
+    assert data.mode == CoordinatorMode.PRICE_WINDOW_EXPORT
+    rig.voltx.assert_awaited_once_with(9000)
+    rig.solax.assert_awaited_once_with(1800)
+
+
+def test_export_holds_the_limit_once_there():
+    rig = Rig()
+    rig.settle(rig.tick())
+    data = rig.tick()
+    assert (data.voltx_command, data.solax_command) == (9000, 1800)
+    assert data.grid_actual == -10000
+
+
+def test_export_without_solax_uses_voltx_alone():
+    rig = Rig(solax=False)
+    data = rig.tick()
+    assert data.voltx_command == 10000  # all it has; 10.8 kW would reach the limit
+    assert data.solax_command == 0
+
+
+def test_binding_constraint_is_still_the_reported_mode():
+    rig = Rig()
+    rig.states.set(E[CONF_ENTITY_VOLTX_SOC], 20)  # Voltx at its floor
+    rig.states.set(E[CONF_ENTITY_SOLAX_SOC], 90)
+    data = rig.tick()
+    assert data.price_window.action == "export"
+    assert data.mode == CoordinatorMode.SOC_FLOOR
+    assert data.voltx_command == 0
+    assert data.solax_command == 3000  # Solax takes what it can
+
+
+# ── hold ──────────────────────────────────────────────────────────────────────
+
+
+def test_hold_hands_the_house_to_native_self_consumption():
+    rig = Rig(sell=(0.17, 10.0, 10.0), high=12.0)
+    data = rig.tick()
+    assert data.price_window.code == "hold_below_min_price"
+    assert data.grid_target == 0
+    assert data.mode == CoordinatorMode.PRICE_WINDOW_HOLD
+    rig.native.assert_awaited()
+    rig.voltx.assert_not_awaited()
+
+
+def test_spike_after_hold_exports_at_once_despite_the_handoff_dwell():
+    rig = Rig(sell=(0.17, 10.0, 10.0), high=12.0)
+    rig.tick()  # hold: handoff starts, 120 s dwell begins
+    rig.states.set(E[CONF_ENTITY_GRID_POWER], 0)
+    rig.states.set(E[CONF_ENTITY_VOLTX_BATTERY_POWER], 800)  # Voltx carrying the house
+    rig.prices((10.48, 0.64, 10.0))
+    data = rig.tick()
+    assert data.price_window.action == "export"
+    assert data.voltx_command == 9000 and data.solax_command == 1800
+
+
+def test_hold_while_the_ev_charges_keeps_the_house_off_the_grid():
+    rig = Rig(sell=(0.17, 10.0, 10.0), high=12.0)
+    rig.states.set(EV, 7000)
+    rig.states.set(E[CONF_ENTITY_GRID_POWER], 7800)  # 7 kW car + 800 W house
+    data = rig.tick()
+    assert data.price_window.action == "hold"
+    assert data.grid_target == 7000
+    assert data.voltx_command + data.solax_command == 800
+    assert data.mode == CoordinatorMode.PRICE_WINDOW_HOLD
+
+
+# ── charge ────────────────────────────────────────────────────────────────────
+
+
+def _short_rig(**kwargs):
+    """Cheap now, spikes predicted ahead, batteries just above their floors."""
+    rig = Rig(sell=(0.17, 9.80, 10.20), **kwargs)
+    rig.states.set(E[CONF_ENTITY_VOLTX_SOC], 21)
+    rig.states.set(E[CONF_ENTITY_SOLAX_SOC], 21)
+    return rig
+
+
+def test_charge_fills_the_import_limit_on_the_first_tick():
+    rig = _short_rig()
+    data = rig.tick()
+    assert data.price_window.code == "charge_shortfall"
+    assert data.grid_target == 12000
+    # 12 kW import limit less the 800 W house, split by capacity.
+    assert data.voltx_command + data.solax_command == pytest.approx(-11200, abs=2)
+    assert data.voltx_command == pytest.approx(-9333, abs=2)
+    assert data.mode == CoordinatorMode.PRICE_WINDOW_CHARGE
+
+
+def test_charge_is_not_clamped_to_zero_by_grid_priority():
+    rig = _short_rig(options={"grid_priority_band": 20000})
+    assert rig.tick().voltx_command < -9000
+
+
+def test_maximum_charge_buy_price_from_a_helper_entity_blocks_charging():
+    rig = _short_rig(options={CONF_PW_MAX_CHARGE_BUY_PRICE: "input_number.max_buy"})
+    rig.states.set("input_number.max_buy", 0.20)  # buying at 28c is over it
+    data = rig.tick()
+    assert data.price_window.code == "hold_charge_too_dear"
+    assert data.grid_target == 0
