@@ -68,6 +68,50 @@ CONF_ENTITY_VOLTX_BATTERY_POWER = "entity_voltx_battery_power"
 CONF_ENTITY_VOLTX_CONTROL_ENABLE = "entity_voltx_control_enable"
 CONF_ENTITY_SOLAX_CONTROL_ENABLE = "entity_solax_control_enable"
 
+# ── Price window (forecast price spikes; Amber Express is the price source) ───
+# Entities.  All optional: the feature is off until the enable entity, both Amber
+# Express entities and the house load entity are set.
+CONF_ENTITY_PW_ENABLE = "entity_price_window_enable"
+CONF_ENTITY_PW_SHADOW = "entity_price_window_shadow"
+CONF_ENTITY_PW_FEED_IN = "entity_price_window_feed_in"
+CONF_ENTITY_PW_GENERAL = "entity_price_window_general"
+CONF_ENTITY_PW_HOUSE_LOAD = "entity_price_window_house_load"
+# Settings.  Each is stored as text and holds either a literal or a helper entity ID.
+CONF_PW_SPIKE_THRESHOLD = "price_window_spike_threshold"
+CONF_PW_LOOKAHEAD_HOURS = "price_window_lookahead_hours"
+CONF_PW_RESERVE_MARGIN_HOURS = "price_window_reserve_margin_hours"
+CONF_PW_RESERVE_UNTIL = "price_window_reserve_until"
+CONF_PW_MIN_SELL_PRICE = "price_window_min_sell_price"
+CONF_PW_CHARGE_RATIO = "price_window_charge_ratio"
+CONF_PW_MAX_CHARGE_BUY_PRICE = "price_window_max_charge_buy_price"
+CONF_PW_ROUND_TRIP_EFFICIENCY = "price_window_round_trip_efficiency"
+
+DEFAULT_PW_SPIKE_THRESHOLD = 1.00        # $/kWh — feed-in high bound that marks a possible spike
+DEFAULT_PW_LOOKAHEAD_HOURS = 4.0         # h — how far ahead a possible spike opens the window
+DEFAULT_PW_RESERVE_MARGIN_HOURS = 2.0    # h — house reserve runs this long past the last possible spike
+DEFAULT_PW_MIN_SELL_PRICE = 0.30         # $/kWh — never export below this inside a window
+DEFAULT_PW_CHARGE_RATIO = 1.5            # required margin of predicted sell over effective buy cost
+DEFAULT_PW_ROUND_TRIP_EFFICIENCY = 0.85  # fraction — matches the EMHASS add-on's ~85%
+PRICE_WINDOW_STALE_MINUTES = 10          # Amber Express data older than this → stand down
+
+# Options-flow fields for the price window step, in display order, with their defaults
+# as text.  Blank means "not set".
+PRICE_WINDOW_FIELDS: dict[str, str] = {
+    CONF_ENTITY_PW_ENABLE: "",
+    CONF_ENTITY_PW_SHADOW: "",
+    CONF_ENTITY_PW_FEED_IN: "",
+    CONF_ENTITY_PW_GENERAL: "",
+    CONF_ENTITY_PW_HOUSE_LOAD: "",
+    CONF_PW_SPIKE_THRESHOLD: str(DEFAULT_PW_SPIKE_THRESHOLD),
+    CONF_PW_LOOKAHEAD_HOURS: str(DEFAULT_PW_LOOKAHEAD_HOURS),
+    CONF_PW_RESERVE_MARGIN_HOURS: str(DEFAULT_PW_RESERVE_MARGIN_HOURS),
+    CONF_PW_RESERVE_UNTIL: "",
+    CONF_PW_MIN_SELL_PRICE: str(DEFAULT_PW_MIN_SELL_PRICE),
+    CONF_PW_CHARGE_RATIO: str(DEFAULT_PW_CHARGE_RATIO),
+    CONF_PW_MAX_CHARGE_BUY_PRICE: "",
+    CONF_PW_ROUND_TRIP_EFFICIENCY: str(DEFAULT_PW_ROUND_TRIP_EFFICIENCY),
+}
+
 # ── Defaults ──────────────────────────────────────────────────────────────────
 DEFAULT_IMPORT_LIMIT = 12000        # W — safe single-phase limit
 DEFAULT_EXPORT_LIMIT = 10000        # W — network export rule

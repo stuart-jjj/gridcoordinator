@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
+from .price_window import PriceWindowDecision
+
 
 class SolaxMode(StrEnum):
     """Operating mode of the Solax priority-2 battery."""
@@ -34,6 +36,10 @@ class CoordinatorMode(StrEnum):
     SOC_CEILING = "soc_ceiling"         # battery at max SOC, charging suppressed
     EV_CHARGING = "ev_charging"              # EV detected; discharge suppressed to let grid absorb load
     LOAD_HEADROOM = "load_headroom"          # headroom reserved for monitored load; charging reduced
+    # Price window in control and no constraint binding (see price_window.py)
+    PRICE_WINDOW_EXPORT = "price_window_export"
+    PRICE_WINDOW_HOLD = "price_window_hold"
+    PRICE_WINDOW_CHARGE = "price_window_charge"
     # Manual override modes (set via service call or override select entity)
     OVERRIDE_SELF_CONSUME = "override_self_consume"
     OVERRIDE_HOLD_SOC = "override_hold_soc"
@@ -76,3 +82,4 @@ class CoordinatorData:
     solax_mode: SolaxMode = SolaxMode.SELF_CONSUMPTION  # Solax operating mode this tick
     ev_current_limit: float | None = None  # A — emergency EV charge-current cap; None when not throttling
     ev_throttle_active: bool = False        # True while the coordinator is capping EV charge current
+    price_window: PriceWindowDecision | None = None  # this tick's price window decision and reason
