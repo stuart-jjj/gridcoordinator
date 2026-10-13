@@ -130,6 +130,40 @@
           "entity_solax_rc_trigger": "Button that activates the remote-control command. E.g. button.solax_remotecontrol_trigger_gen3",
           "entity_solax_control_enable": "Boolean helper (input_boolean, switch or template binary_sensor). GridCoordinator controls the Solax (secondary) battery only while this is 'on'. Leave blank to always control Solax. When off, Solax is released to native self-consumption."
         }
+      },
+      "price_window": {
+        "title": "Price Window",
+        "description": "What to do during forecast price spikes: export at full power, hold, or charge, keeping enough energy to run the house. Prices come from **Amber Express**. Leave the enable entity blank to keep this off. Each numeric or time setting takes a value or the entity ID of a helper.",
+        "data": {
+          "entity_price_window_enable": "Enable (switch-like entity)",
+          "entity_price_window_shadow": "Shadow mode (switch-like entity)",
+          "entity_price_window_feed_in": "Amber Express feed-in price entity",
+          "entity_price_window_general": "Amber Express general price entity",
+          "entity_price_window_house_load": "Expected house load entity (W)",
+          "price_window_spike_threshold": "Spike threshold ($/kWh)",
+          "price_window_lookahead_hours": "Lookahead (h)",
+          "price_window_reserve_margin_hours": "Reserve margin (h)",
+          "price_window_reserve_until": "Reserve until (clock time)",
+          "price_window_min_sell_price": "Minimum sell price ($/kWh)",
+          "price_window_charge_ratio": "Charge ratio",
+          "price_window_max_charge_buy_price": "Maximum charge buy price ($/kWh)",
+          "price_window_round_trip_efficiency": "Round-trip efficiency"
+        },
+        "data_description": {
+          "entity_price_window_enable": "input_boolean, switch or template binary_sensor. The price window runs only while this is 'on'. Blank = off.",
+          "entity_price_window_shadow": "While this is 'on', or blank, or unavailable, the decision is worked out and reported but does not control the batteries. Turn it 'off' to go live.",
+          "entity_price_window_feed_in": "E.g. sensor.amber_express_home_feed_in_price. Its detailedForecast attribute is read.",
+          "entity_price_window_general": "E.g. sensor.amber_express_home_general_price. Its detailedForecast attribute is read.",
+          "entity_price_window_house_load": "A sensor in watts giving the average house load to expect over the next few hours. It sizes the energy kept back for the house.",
+          "price_window_spike_threshold": "An interval counts as a possible spike when the top of its feed-in forecast range reaches this, or when Amber flags it. A confirmed price at or above this is always sold ahead of intervals that merely could beat it.",
+          "price_window_lookahead_hours": "A possible spike this far ahead puts the price window in control. Until it arrives the batteries hold, unless there is energy to spare at a good price.",
+          "price_window_reserve_margin_hours": "Energy to run the house is kept until this long after the last possible spike.",
+          "price_window_reserve_until": "Optional. HH:MM, or an input_datetime. When set, energy for the house is kept until the next time the clock reads this (today or tomorrow) instead of using the margin.",
+          "price_window_min_sell_price": "Never export below this price while a window is active.",
+          "price_window_charge_ratio": "Charge from the grid only when the predicted spike price is at least this many times the buy price after round-trip losses.",
+          "price_window_max_charge_buy_price": "Optional. Never charge from the grid above this buy price, whatever the formula says. Blank = formula only.",
+          "price_window_round_trip_efficiency": "Fraction of bought energy that comes back out (0.85 = 85%). Match the EMHASS efficiencies."
+        }
       }
     },
     "abort": {
@@ -275,6 +309,40 @@
           "entity_solax_rc_autorepeat_duration": "Seconds the command stays active before the inverter reverts.",
           "entity_solax_rc_trigger": "Button that activates the remote-control command.",
           "entity_solax_control_enable": "Boolean helper (input_boolean, switch or template binary_sensor). GridCoordinator controls the Solax (secondary) battery only while this is 'on'. Leave blank to always control Solax. When off, Solax is released to native self-consumption."
+        }
+      },
+      "price_window": {
+        "title": "Price Window",
+        "description": "What to do during forecast price spikes: export at full power, hold, or charge, keeping enough energy to run the house. Prices come from **Amber Express**. Leave the enable entity blank to keep this off. Each numeric or time setting takes a value or the entity ID of a helper.",
+        "data": {
+          "entity_price_window_enable": "Enable (switch-like entity)",
+          "entity_price_window_shadow": "Shadow mode (switch-like entity)",
+          "entity_price_window_feed_in": "Amber Express feed-in price entity",
+          "entity_price_window_general": "Amber Express general price entity",
+          "entity_price_window_house_load": "Expected house load entity (W)",
+          "price_window_spike_threshold": "Spike threshold ($/kWh)",
+          "price_window_lookahead_hours": "Lookahead (h)",
+          "price_window_reserve_margin_hours": "Reserve margin (h)",
+          "price_window_reserve_until": "Reserve until (clock time)",
+          "price_window_min_sell_price": "Minimum sell price ($/kWh)",
+          "price_window_charge_ratio": "Charge ratio",
+          "price_window_max_charge_buy_price": "Maximum charge buy price ($/kWh)",
+          "price_window_round_trip_efficiency": "Round-trip efficiency"
+        },
+        "data_description": {
+          "entity_price_window_enable": "input_boolean, switch or template binary_sensor. The price window runs only while this is 'on'. Blank = off.",
+          "entity_price_window_shadow": "While this is 'on', or blank, or unavailable, the decision is worked out and reported but does not control the batteries. Turn it 'off' to go live.",
+          "entity_price_window_feed_in": "E.g. sensor.amber_express_home_feed_in_price. Its detailedForecast attribute is read.",
+          "entity_price_window_general": "E.g. sensor.amber_express_home_general_price. Its detailedForecast attribute is read.",
+          "entity_price_window_house_load": "A sensor in watts giving the average house load to expect over the next few hours. It sizes the energy kept back for the house.",
+          "price_window_spike_threshold": "An interval counts as a possible spike when the top of its feed-in forecast range reaches this, or when Amber flags it. A confirmed price at or above this is always sold ahead of intervals that merely could beat it.",
+          "price_window_lookahead_hours": "A possible spike this far ahead puts the price window in control. Until it arrives the batteries hold, unless there is energy to spare at a good price.",
+          "price_window_reserve_margin_hours": "Energy to run the house is kept until this long after the last possible spike.",
+          "price_window_reserve_until": "Optional. HH:MM, or an input_datetime. When set, energy for the house is kept until the next time the clock reads this (today or tomorrow) instead of using the margin.",
+          "price_window_min_sell_price": "Never export below this price while a window is active.",
+          "price_window_charge_ratio": "Charge from the grid only when the predicted spike price is at least this many times the buy price after round-trip losses.",
+          "price_window_max_charge_buy_price": "Optional. Never charge from the grid above this buy price, whatever the formula says. Blank = formula only.",
+          "price_window_round_trip_efficiency": "Fraction of bought energy that comes back out (0.85 = 85%). Match the EMHASS efficiencies."
         }
       }
     }

@@ -38,3 +38,35 @@ def test_removed_options_are_gone_from_both_flows():
             keys = _step(flow, step)[section]
             for key in REMOVED_KEYS:
                 assert key not in keys, (flow, section, key)
+
+
+# ── price window step ─────────────────────────────────────────────────────────
+
+def test_every_price_window_field_is_labelled_in_both_flows():
+    from custom_components.grid_coordinator.const import PRICE_WINDOW_FIELDS
+
+    for flow in ("config", "options"):
+        step = _step(flow, "price_window")
+        assert step["title"] and step["description"]
+        assert set(step["data"]) == set(PRICE_WINDOW_FIELDS), flow
+        assert set(step["data_description"]) == set(PRICE_WINDOW_FIELDS), flow
+        assert all(step["data"].values()) and all(step["data_description"].values())
+
+
+def test_price_window_field_defaults():
+    from custom_components.grid_coordinator.const import PRICE_WINDOW_FIELDS as F
+
+    assert F["price_window_spike_threshold"] == "1.0"
+    assert F["price_window_lookahead_hours"] == "4.0"
+    assert F["price_window_reserve_margin_hours"] == "2.0"
+    assert F["price_window_min_sell_price"] == "0.3"
+    assert F["price_window_charge_ratio"] == "1.5"
+    assert F["price_window_round_trip_efficiency"] == "0.85"
+    # Unset by default: the feature is off, shadow is on, no clock time, no buy cap.
+    for key in (
+        "entity_price_window_enable", "entity_price_window_shadow",
+        "entity_price_window_feed_in", "entity_price_window_general",
+        "entity_price_window_house_load", "price_window_reserve_until",
+        "price_window_max_charge_buy_price",
+    ):
+        assert F[key] == "", key

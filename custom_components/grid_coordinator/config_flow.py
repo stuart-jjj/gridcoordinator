@@ -108,6 +108,7 @@ from .const import (
     ENTITY_EV_CHARGER,
     ENTITY_ID_DEFAULTS,
     ENTITY_MON_LOAD_1,
+    PRICE_WINDOW_FIELDS,
     SIM_ENTITY_IDS,
 )
 
@@ -267,6 +268,27 @@ def _solax_schema(defaults: dict) -> vol.Schema:
     )
 
 
+def _price_window_schema(defaults: dict) -> vol.Schema:
+    """Schema for the price window step (step 4).
+
+    Every field is free text: an entity ID, or for the numeric and time settings
+    either a literal or the ID of a helper entity.  Blank means "not set".
+    """
+    return vol.Schema(
+        {
+            # suggested_value, not default: a field cleared on the form is then left
+            # out of the input (and stored blank) instead of being refilled.
+            vol.Optional(key, description={"suggested_value": defaults.get(key, default)}): _TEXT
+            for key, default in PRICE_WINDOW_FIELDS.items()
+        }
+    )
+
+
+def _price_window_input(user_input: dict) -> dict:
+    """Every price window field, with one left blank on the form stored as ""."""
+    return {key: str(user_input.get(key, "")).strip() for key in PRICE_WINDOW_FIELDS}
+
+
 def _entities_schema(defaults: dict) -> vol.Schema:
     """Schema for entity ID configuration — uses free-text so any entity ID is accepted."""
     return vol.Schema(
@@ -345,11 +367,25 @@ class GridCoordinatorFlowHandler(ConfigFlow, domain=DOMAIN):
         """Step 3 — Solax entity IDs."""
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="Grid Coordinator", data=self._data)
+            return await self.async_step_price_window()
 
         return self.async_show_form(
             step_id="solax",
             data_schema=_solax_schema(ENTITY_ID_DEFAULTS),
+        )
+
+    async def async_step_price_window(
+        self,
+        user_input: dict | None = None,
+    ) -> ConfigFlowResult:
+        """Step 4 — price window (optional; leave the entities blank to skip)."""
+        if user_input is not None:
+            self._data.update(_price_window_input(user_input))
+            return self.async_create_entry(title="Grid Coordinator", data=self._data)
+
+        return self.async_show_form(
+            step_id="price_window",
+            data_schema=_price_window_schema(PRICE_WINDOW_FIELDS),
         )
 
     @staticmethod
@@ -463,7 +499,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         """Step 3 — Solax entity IDs."""
         if user_input is not None:
             self._data.update(user_input)
-            return self.async_create_entry(title="", data=self._data)
+            return await self.async_step_price_window()
 
         solax_keys = (
             CONF_ENTITY_SOLAX_SOC,
@@ -489,4 +525,21 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
         return self.async_show_form(
             step_id="solax",
             data_schema=_solax_schema(solax_defaults),
+        )
+
+    async def async_step_price_window(
+        self,
+        user_input: dict | None = None,
+    ) -> ConfigFlowResult:
+        """Step 4 — price window."""
+        if user_input is not None:
+            self._data.update(_price_window_input(user_input))
+            return self.async_create_entry(title="", data=self._data)
+
+        current = {
+            key: str(self._current(key, default)) for key, default in PRICE_WINDOW_FIELDS.items()
+        }
+        return self.async_show_form(
+            step_id="price_window",
+            data_schema=_price_window_schema(current),
         )

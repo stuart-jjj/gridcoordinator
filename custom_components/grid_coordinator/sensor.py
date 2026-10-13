@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from datetime import datetime
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -12,12 +13,13 @@ from homeassistant.components.sensor import (
     SensorEntityDescription,
     SensorStateClass,
 )
-from homeassistant.const import UnitOfElectricCurrent, UnitOfPower
+from homeassistant.const import UnitOfElectricCurrent, UnitOfEnergy, UnitOfPower
 from homeassistant.core import HomeAssistant
 
 from .coordinator import GridCoordinator
 from .entity import GridCoordinatorEntity
 from .models import CoordinatorData
+from .price_window import decision_attributes
 
 if TYPE_CHECKING:
     from homeassistant.helpers.entity_platform import AddEntitiesCallback
@@ -29,7 +31,8 @@ if TYPE_CHECKING:
 class GridSensorDescription(SensorEntityDescription):
     """Extends SensorEntityDescription with a typed data accessor."""
 
-    value_fn: Callable[[CoordinatorData], str | float | None]
+    value_fn: Callable[[CoordinatorData], str | float | datetime | None]
+    attrs_fn: Callable[[CoordinatorData], dict | None] | None = None
 
 
 SENSOR_DESCRIPTIONS: tuple[GridSensorDescription, ...] = (
@@ -108,6 +111,41 @@ SENSOR_DESCRIPTIONS: tuple[GridSensorDescription, ...] = (
         native_unit_of_measurement=UnitOfElectricCurrent.AMPERE,
         value_fn=lambda d: d.ev_current_limit,
     ),
+    # Price window.  The reason sensor's attributes hold the sentence and the working
+    # (see price_window.decision_attributes); they are recorded, so a decision can be
+    # checked afterwards against the forecast Amber Express showed at the time.
+    GridSensorDescription(
+        key="price_window_reason",
+        name="Price Window Reason",
+        icon="mdi:comment-question-outline",
+        value_fn=lambda d: d.price_window.code if d.price_window else None,
+        attrs_fn=lambda d: decision_attributes(d.price_window) if d.price_window else None,
+    ),
+    GridSensorDescription(
+        key="price_window_end",
+        name="Price Window End",
+        icon="mdi:timer-sand",
+        device_class=SensorDeviceClass.TIMESTAMP,
+        value_fn=lambda d: d.price_window.window_end if d.price_window else None,
+    ),
+    GridSensorDescription(
+        key="price_window_house_reserve",
+        name="Price Window House Reserve",
+        icon="mdi:home-battery",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value_fn=lambda d: d.price_window.house_reserve_kwh if d.price_window and d.price_window.action else None,
+    ),
+    GridSensorDescription(
+        key="price_window_surplus",
+        name="Price Window Surplus",
+        icon="mdi:battery-arrow-up-outline",
+        state_class=SensorStateClass.MEASUREMENT,
+        native_unit_of_measurement=UnitOfEnergy.KILO_WATT_HOUR,
+        suggested_display_precision=1,
+        value_fn=lambda d: d.price_window.surplus_kwh if d.price_window and d.price_window.action else None,
+    ),
 )
 
 
@@ -139,7 +177,14 @@ class GridCoordinatorSensor(GridCoordinatorEntity, SensorEntity):
         self._attr_unique_id = f"{coordinator.config_entry.entry_id}_{description.key}"
 
     @property
-    def native_value(self) -> str | float | None:
+    def native_value(self) -> str | float | datetime | None:
         if self.coordinator.data is None:
             return None
         return self.entity_description.value_fn(self.coordinator.data)
+
+    @property
+    def extra_state_attributes(self) -> dict | None:
+        attrs_fn = self.entity_description.attrs_fn
+        if attrs_fn is None or self.coordinator.data is None:
+            return None
+        return attrs_fn(self.coordinator.data)

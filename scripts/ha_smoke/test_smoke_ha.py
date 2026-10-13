@@ -367,6 +367,8 @@ async def test_options_flow_exposes_and_saves_the_new_options(hass):
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] == FlowResultType.FORM and result["step_id"] == "solax"
     result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.FORM and result["step_id"] == "price_window"
+    result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] == FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
     assert entry.options["sc_min_dwell_seconds"] == 60
@@ -385,8 +387,131 @@ async def test_entry_carrying_removed_option_keys_still_works(hass):
 
     result = await hass.config_entries.options.async_init(entry.entry_id)
     assert result["type"] == FlowResultType.FORM and result["step_id"] == "init"
-    for _ in range(3):  # init -> entities -> solax -> create
+    for _ in range(4):  # init -> entities -> solax -> price_window -> create
         result = await hass.config_entries.options.async_configure(result["flow_id"], {})
     assert result["type"] == FlowResultType.CREATE_ENTRY
     await hass.async_block_till_done()
     assert not (set(stale) & set(entry.options))
+
+
+# ── price window on real HA ───────────────────────────────────────────────────
+
+PW_FEED = "sensor.amber_express_home_feed_in_price"
+PW_GENERAL = "sensor.amber_express_home_general_price"
+PW_OPTIONS = {
+    "entity_price_window_enable": "input_boolean.pw_enable",
+    "entity_price_window_shadow": "input_boolean.pw_shadow",
+    "entity_price_window_feed_in": PW_FEED,
+    "entity_price_window_general": PW_GENERAL,
+    "entity_price_window_house_load": "sensor.pw_house_load",
+}
+
+
+def _pw_seed(hass, sell, *, shadow="off"):
+    """Seed Amber Express the way it really reports: UTC strings, start one second late."""
+    from datetime import timedelta
+
+    from homeassistant.util import dt as dt_util
+
+    now = dt_util.utcnow()
+    start = now.replace(minute=now.minute - now.minute % 5, second=0, microsecond=0)
+
+    def forecast(prices):
+        entries = []
+        for index, price in enumerate(prices):
+            begin = start + timedelta(minutes=5 * index)
+            entry = {
+                "per_kwh": price,
+                "start_time": (begin + timedelta(seconds=1)).isoformat(),
+                "end_time": (begin + timedelta(minutes=5)).isoformat(),
+                "spike_status": "none",
+                "estimate": index > 0,
+            }
+            if index > 0:
+                entry["advanced_price_predicted"] = {"low": price / 2, "predicted": price, "high": price}
+            entries.append(entry)
+        return {"detailedForecast": entries}
+
+    hass.states.async_set(PW_FEED, str(sell[0]), forecast(sell))
+    hass.states.async_set(PW_GENERAL, str(sell[0] + 0.11), forecast([p + 0.11 for p in sell]))
+    hass.states.async_set("input_boolean.pw_enable", "on")
+    hass.states.async_set("input_boolean.pw_shadow", shadow)
+    hass.states.async_set("sensor.pw_house_load", "1000")
+
+
+async def test_price_window_exports_and_reports_its_reason(hass):
+    entry, coordinator, calls = await _setup(hass, grid=800.0, extra_options=PW_OPTIONS, voltx_soc=80.0)
+    _pw_seed(hass, (10.48, 0.64, 10.0))
+    data = await _tick(hass, coordinator)
+    assert data.price_window.code == "export_allocated"
+    assert data.grid_target == -10000
+    assert data.voltx_command == 5000  # the seeded Voltx limit, reached in one tick
+    assert [c.data["value"] for c in calls["number"]][-1] == "5000"
+
+    reason = hass.states.get("sensor.grid_coordinator_price_window_reason")
+    assert reason.state == "export_allocated"
+    assert reason.attributes["reason"].startswith("Exporting: $10.48 now")
+    assert reason.attributes["intervals"][0]["basis"] == "confirmed"
+    assert reason.attributes["shadow"] is False
+    assert hass.states.get("sensor.grid_coordinator_price_window_end").state not in ("unknown", "unavailable")
+    assert float(hass.states.get("sensor.grid_coordinator_price_window_surplus").state) > 0
+    assert float(hass.states.get("sensor.grid_coordinator_price_window_house_reserve").state) > 0
+
+
+async def test_price_window_shadow_does_not_control(hass):
+    entry, coordinator, calls = await _setup(hass, extra_options=PW_OPTIONS, voltx_soc=80.0)
+    _pw_seed(hass, (10.48, 0.64, 10.0), shadow="on")
+    data = await _tick(hass, coordinator)
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+    assert data.grid_target == 0
+    reason = hass.states.get("sensor.grid_coordinator_price_window_reason")
+    assert reason.state == "export_allocated"
+    assert reason.attributes["shadow"] is True
+    assert reason.attributes["would_command_w"] == -10000
+
+
+async def test_price_window_unconfigured_changes_nothing(hass):
+    entry, coordinator, _ = await _setup(hass)
+    data = await _tick(hass, coordinator)
+    assert data.mode == CoordinatorMode.SELF_CONSUMPTION
+    assert hass.states.get("sensor.grid_coordinator_price_window_reason").state == "disabled"
+    assert hass.states.get("sensor.grid_coordinator_price_window_end").state == "unknown"
+    assert hass.states.get("sensor.grid_coordinator_price_window_surplus").state == "unknown"
+
+
+async def test_options_flow_price_window_step_saves_literals_and_entities(hass):
+    entry, coordinator, _ = await _setup(hass)
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    for _ in range(3):  # init -> entities -> solax -> price_window
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    assert result["type"] == FlowResultType.FORM and result["step_id"] == "price_window"
+    fields = voluptuous_serialize.convert(result["data_schema"], custom_serializer=cv.custom_serializer)
+    shown = {f["name"]: f["description"]["suggested_value"] for f in fields}
+    assert shown["price_window_spike_threshold"] == "1.0"
+    assert shown["entity_price_window_enable"] == ""
+    assert len(fields) == 13
+
+    result = await hass.config_entries.options.async_configure(
+        result["flow_id"],
+        # the frontend submits every prefilled field, plus what the user typed
+        {**shown, **PW_OPTIONS, "price_window_spike_threshold": "input_number.pw_spike",
+         "price_window_reserve_until": "06:30", "price_window_max_charge_buy_price": "1.00"},
+    )
+    assert result["type"] == FlowResultType.CREATE_ENTRY
+    await hass.async_block_till_done()
+    assert entry.options["price_window_spike_threshold"] == "input_number.pw_spike"
+    assert entry.options["price_window_reserve_until"] == "06:30"
+    assert entry.options["price_window_lookahead_hours"] == "4.0"
+
+    # Re-open: the saved values come back as the defaults, and clearing one unsets it.
+    result = await hass.config_entries.options.async_init(entry.entry_id)
+    for _ in range(3):
+        result = await hass.config_entries.options.async_configure(result["flow_id"], {})
+    fields = voluptuous_serialize.convert(result["data_schema"], custom_serializer=cv.custom_serializer)
+    shown = {f["name"]: f["description"]["suggested_value"] for f in fields}
+    assert shown["price_window_reserve_until"] == "06:30"
+    # The frontend leaves a cleared text field out of what it submits.
+    saved = {name: value for name, value in shown.items() if name != "price_window_reserve_until"}
+    result = await hass.config_entries.options.async_configure(result["flow_id"], saved)
+    await hass.async_block_till_done()
+    assert entry.options["price_window_reserve_until"] == ""
