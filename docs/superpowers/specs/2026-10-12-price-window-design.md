@@ -87,11 +87,16 @@ interval start. Each `PriceInterval` has:
 | `sell` | feed-in `per_kwh` |
 | `sell_high` | feed-in `advanced_price_predicted.high`, else `per_kwh` |
 | `buy` | general `per_kwh` |
-| `confirmed` | `estimate` is false |
+| `buy_high` | general `advanced_price_predicted.high`, else `per_kwh` |
+| `confirmed` | `estimate` is false on both channels |
 | `flagged` | `spike_status` is `potential` or `spike` on either channel |
 
 Intervals that have ended are dropped. Entries with unparseable times or
 prices are skipped. Returns an empty list if no interval covers `now`.
+
+Amber Express writes each start one second late (`02:00:01`) and each end on
+the boundary (`02:05:00`). Starts are rounded down to the minute, so the first
+second of an interval is covered.
 
 **`decide_price_window(intervals, now, energy, limits, settings) -> PriceWindowDecision`**
 
@@ -104,15 +109,25 @@ Pure. Steps:
 2. **House reserve.** Reserve horizon = window end + reserve margin, or, if a
    reserve-until clock time is set, the next occurrence of that time (today if
    still ahead, otherwise tomorrow). House reserve = expected house load x time
-   from `now` to the horizon, divided by discharge efficiency.
+   from `now` to the horizon, divided by discharge efficiency (the square root
+   of the round-trip efficiency). Solar is not counted, which errs on the side
+   of keeping more.
 3. **Surplus.** Usable energy above the SOC floor (Voltx plus Solax, when the
    Solax is under control) minus the house reserve, floored at zero.
-4. **Allocate.** Take every interval from `now` to the window end whose ranking
-   price is at or above the minimum sell price. Ranking price is `sell` for a
-   confirmed current interval and `sell_high` otherwise. Sort highest first.
-   Give each its full export energy (maximum export power x remaining
-   duration) until the surplus is spent. The last interval served may be
-   partly served.
+4. **Allocate.** Take every interval from `now` to the window end whose
+   `sell_high` is at or above the minimum sell price. Ranking price is `sell`
+   for a confirmed current interval and `sell_high` otherwise, with one
+   exception (spike in hand, below). Sort highest first. Give each its full
+   export energy (maximum export power x remaining duration, divided by
+   discharge efficiency) until the surplus is spent. The last interval served
+   may be partly served.
+
+   **Spike in hand.** If the current interval is confirmed at or above the
+   spike threshold, later intervals are ranked on `sell` (their predicted
+   price) instead of `sell_high`. A real spike price is then held back only
+   for an interval predicted to beat it, never for one that merely could.
+   Without this, a confirmed $10.48 would be held for intervals predicted at
+   60c whose range tops out at $12.
 5. **Decide.**
    - `export` at maximum export power if the current interval received any
      allocation.
@@ -123,6 +138,9 @@ Pure. Steps:
      cheapest unserved qualifying interval. Charging uses the `predicted`
      price, not `sell_high`. The maximum charge buy price is an absolute cap
      that overrides the formula; if it is unset the formula alone decides.
+     While the current interval is unconfirmed, `buy` here is `buy_high`:
+     charging does not start on a price that could still turn out to be a
+     spike.
    - `hold` otherwise.
 
 **Interval boundaries.** When the clock passes into a new interval before
@@ -170,6 +188,19 @@ executes it:
 | `charge` | plus the charge power, bounded by the import limit |
 | `hold` | zero (the existing self-consumption handoff) |
 
+The battery setpoint that goes with the target is anchored on the grid power
+with the batteries' own output added back, so the target is reached in one
+step. For that reason the proportional grid correction (tier 2), transient
+damping and the entity-driven grid-priority mode are switched off on a price
+window tick, and the self-consumption handoff's minimum dwell does not delay a
+change of decision.
+
+**Hold while the EV charges.** The existing rule that the EV is served from
+the grid still applies, so `hold` does not use the handoff then. The batteries
+carry the rest of the house and the grid target is the EV's own draw. Without
+this the whole house would be bought from the grid for as long as the car
+charged.
+
 No new inverter write paths are added. The Voltx/Solax split, import and
 export ceilings, EV headroom, monitored-load headroom and SOC limits all apply
 as they do in tracking. The plan-staleness check does not apply to a price
@@ -183,11 +214,14 @@ actual response.
 
 **Stale data.** If either Amber Express entity is unavailable, its
 `detailedForecast` is missing, no interval covers `now`, or the entity was
-last updated more than a fixed age ago (10 minutes), the price window stands
-down for the tick and EMHASS tracking runs.
+last updated more than a fixed age ago (10 minutes), or the expected house
+load entity is unreadable, the price window stands down for the tick and
+EMHASS tracking runs.
 
 **Shadow mode.** When the shadow setting is on, the decision is computed and
-reported every tick but never replaces the grid target.
+reported every tick but never replaces the grid target. Shadow is on unless
+the shadow entity reads exactly `off`: unset, missing or unavailable all mean
+shadow.
 
 ### Reporting
 
@@ -229,7 +263,8 @@ three layers.
 
 Hold codes are checked in this order: `hold_no_surplus`,
 `hold_below_min_price`, `hold_outranked`; then, only if a qualifying interval
-is unserved, `hold_soc_ceiling` or `hold_charge_too_dear` replaces it.
+is unserved, `hold_soc_ceiling` or `hold_charge_too_dear` replaces it. The
+sentence then keeps the first reason and adds why it is not charging.
 
 **2. Sentence** (attribute `reason`), with the figures, for example:
 
@@ -247,7 +282,7 @@ is unserved, `hold_soc_ceiling` or `hold_charge_too_dear` replaces it.
 - `usable_kwh`, `house_reserve_kwh`, `surplus_kwh`, `shortfall_kwh`
 - `current_sell`, `current_buy`, `current_confirmed`, `current_rank`
 - `intervals`: one row per interval in the window with start, ranking price,
-  basis (`confirmed` or `high`), `qualifies`, and allocated kWh
+  basis (`confirmed`, `high` or `predicted`), `qualifies`, and allocated kWh
 - `shadow` and, in shadow mode, `would_command_w`
 
 The `intervals` attribute is limited to the window, so it stays small, and it
@@ -260,7 +295,8 @@ Codes and sentences are identical in shadow and live modes.
 
 ### Settings
 
-All in the options flow. Every numeric or time setting accepts either a
+All in the options flow, in a new fourth step, "Price Window". A setting left
+blank falls back to its default. Every numeric or time setting accepts either a
 literal or a helper entity ID, read with the existing `_float_or_entity`
 pattern (a time setting accepts `HH:MM` or an `input_datetime`).
 
