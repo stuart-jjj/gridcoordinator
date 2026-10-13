@@ -463,3 +463,42 @@ def decision_attributes(decision: PriceWindowDecision) -> dict:
             for row in decision.intervals
         ],
     }
+
+
+# ── setpoints ─────────────────────────────────────────────────────────────────
+
+
+def window_setpoints(
+    action: str,
+    *,
+    grid_uncontrolled: float,
+    export_limit: float,
+    import_limit: float,
+    headroom_reserve: float,
+    max_discharge: float,
+    max_charge: float,
+    ev_power: float = 0.0,
+) -> tuple[float, float]:
+    """Return (grid_target, battery_setpoint) in W for a price window action.
+
+    `grid_uncontrolled` is the grid power with every commanded battery's output added
+    back.  The battery setpoint is for the batteries combined (+ = discharge) and is
+    anchored on that figure, so the tracking path reaches the target in one step and
+    the grid target it is given is one it can actually hold.
+
+    export: the batteries make up whatever the meter needs to sit at the export limit.
+    charge: the batteries take everything the import limit (less any reserved
+            headroom) allows.
+    hold:   the batteries carry the house and nothing else.  `ev_power` (the EV
+            charger's draw, when it is charging) stays on the grid.
+    """
+    if action == ACTION_EXPORT:
+        battery = min(max_discharge, grid_uncontrolled + export_limit)
+        battery = max(-max_charge, battery)
+        return -export_limit, battery
+    if action == ACTION_CHARGE:
+        battery = max(-max_charge, grid_uncontrolled - (import_limit - headroom_reserve))
+        battery = min(max_discharge, battery)
+        return grid_uncontrolled - battery, battery
+    battery = max(-max_charge, min(max_discharge, grid_uncontrolled - ev_power))
+    return grid_uncontrolled - battery, battery

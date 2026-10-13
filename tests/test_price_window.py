@@ -16,6 +16,7 @@ from custom_components.grid_coordinator.price_window import (
     decide_price_window,
     decision_attributes,
     parse_amber_express,
+    window_setpoints,
 )
 
 SYD = ZoneInfo("Australia/Sydney")
@@ -461,3 +462,46 @@ def test_replay_with_a_small_battery_never_sells_cheap_while_spikes_are_possible
     assert all(result[step][1] == ACTION_EXPORT for step in SPIKE_STEPS[:4])
     # At the 17c dips, with spikes still possible and the battery short, it buys.
     assert [row[1] for row in result if row[0] == 0.17] == [ACTION_CHARGE, ACTION_CHARGE]
+
+
+# ── setpoints ─────────────────────────────────────────────────────────────────
+
+_SP = dict(export_limit=10000.0, import_limit=12000.0, headroom_reserve=0.0,
+           max_discharge=13000.0, max_charge=12600.0)
+
+
+def test_export_setpoint_makes_up_the_export_limit():
+    # House drawing 800 W with the batteries idle: 10.8 kW of discharge exports 10 kW.
+    assert window_setpoints(ACTION_EXPORT, grid_uncontrolled=800.0, **_SP) == (-10000.0, 10800.0)
+
+
+def test_export_setpoint_is_capped_by_what_the_batteries_can_deliver():
+    assert window_setpoints(ACTION_EXPORT, grid_uncontrolled=4000.0, **_SP) == (-10000.0, 13000.0)
+
+
+def test_export_setpoint_with_solar_already_over_the_limit_charges_the_excess():
+    assert window_setpoints(ACTION_EXPORT, grid_uncontrolled=-11000.0, **_SP) == (-10000.0, -1000.0)
+
+
+def test_charge_setpoint_fills_the_import_limit():
+    # 800 W of house leaves 11.2 kW of import for charging.
+    assert window_setpoints(ACTION_CHARGE, grid_uncontrolled=800.0, **_SP) == (12000.0, -11200.0)
+
+
+def test_charge_setpoint_leaves_reserved_headroom_free():
+    sp = dict(_SP, headroom_reserve=3000.0)
+    assert window_setpoints(ACTION_CHARGE, grid_uncontrolled=800.0, **sp) == (9000.0, -8200.0)
+
+
+def test_charge_setpoint_is_capped_by_what_the_batteries_can_take():
+    assert window_setpoints(ACTION_CHARGE, grid_uncontrolled=-2000.0, **_SP) == (10600.0, -12600.0)
+
+
+def test_hold_setpoint_carries_the_house_at_zero_grid():
+    assert window_setpoints(ACTION_HOLD, grid_uncontrolled=800.0, **_SP) == (0.0, 800.0)
+    assert window_setpoints(ACTION_HOLD, grid_uncontrolled=-3000.0, **_SP) == (0.0, -3000.0)
+
+
+def test_hold_setpoint_leaves_the_ev_on_the_grid():
+    # 7.8 kW at the meter of which 7 kW is the car: the batteries carry the other 800 W.
+    assert window_setpoints(ACTION_HOLD, grid_uncontrolled=7800.0, ev_power=7000.0, **_SP) == (7000.0, 800.0)
