@@ -19,6 +19,7 @@ CONF_TEST_MODE = "test_mode"
 CONF_SELF_CONSUMPTION_MODE = "self_consumption_mode"
 CONF_SELF_CONSUMPTION_DEADBAND = "self_consumption_deadband"
 CONF_SC_MIN_DWELL_SECONDS = "sc_min_dwell_seconds"
+CONF_SC_EXIT_MARGIN = "sc_exit_margin"
 CONF_TRACKING_DEADBAND = "tracking_deadband"
 CONF_TIER2_GAIN = "tier2_gain"
 CONF_GRID_PRIORITY_BAND = "grid_priority_band"
@@ -136,6 +137,7 @@ DEFAULT_MPC_BATT_SIGN_INVERTED = False  # positive = discharge (matches coordina
 DEFAULT_SELF_CONSUMPTION_MODE = "Self-consumption"  # Voltx Modbus work-mode name
 DEFAULT_SELF_CONSUMPTION_DEADBAND = 50  # W — |grid_target| below this → self-consumption
 DEFAULT_SC_MIN_DWELL_SECONDS = 120      # s — lock after any handoff transition (one EMHASS republish)
+DEFAULT_SC_EXIT_MARGIN = 150            # W — added to the deadband before leaving the handoff (hysteresis)
 DEFAULT_TRACKING_DEADBAND = 200         # W — hold command if grid error is within this band
 DEFAULT_TIER2_GAIN = 0.5                # fraction — damps tier-2 correction to prevent oscillation
 DEFAULT_GRID_PRIORITY_BAND = 0          # W — |grid_target| ≤ this → deadbeat grid tracking; 0 disables auto-trigger

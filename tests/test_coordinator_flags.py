@@ -56,3 +56,17 @@ def test_removed_options_are_not_exposed():
         "DEFAULT_SC_POWER_SMOOTHING_SECONDS",
     ):
         assert not hasattr(const, name), name
+
+
+def _exit_margin(*, options: dict | None = None) -> float:
+    coordinator = SimpleNamespace(_entry=SimpleNamespace(options=options or {}, data={}))
+    coordinator._opt = MethodType(GridCoordinator._opt, coordinator)
+    return GridCoordinator._sc_exit_margin.fget(coordinator)
+
+
+def test_exit_margin_default_and_override():
+    from custom_components.grid_coordinator.const import CONF_SC_EXIT_MARGIN, DEFAULT_SC_EXIT_MARGIN
+
+    assert DEFAULT_SC_EXIT_MARGIN == 150
+    assert _exit_margin() == 150.0
+    assert _exit_margin(options={CONF_SC_EXIT_MARGIN: 300}) == 300.0

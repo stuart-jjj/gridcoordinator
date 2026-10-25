@@ -88,6 +88,7 @@ from .const import (
     CONF_PW_ROUND_TRIP_EFFICIENCY,
     CONF_PW_SPIKE_THRESHOLD,
     CONF_RAMP_STEP,
+    CONF_SC_EXIT_MARGIN,
     CONF_SC_MIN_DWELL_SECONDS,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
@@ -128,6 +129,7 @@ from .const import (
     DEFAULT_PW_ROUND_TRIP_EFFICIENCY,
     DEFAULT_PW_SPIKE_THRESHOLD,
     DEFAULT_RAMP_STEP,
+    DEFAULT_SC_EXIT_MARGIN,
     DEFAULT_SC_MIN_DWELL_SECONDS,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
@@ -508,6 +510,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
     @property
     def _sc_min_dwell_seconds(self) -> float:
         return float(self._opt(CONF_SC_MIN_DWELL_SECONDS, DEFAULT_SC_MIN_DWELL_SECONDS))
+
+    @property
+    def _sc_exit_margin(self) -> float:
+        return float(self._opt(CONF_SC_EXIT_MARGIN, DEFAULT_SC_EXIT_MARGIN))
 
     @property
     def _tracking_deadband(self) -> float:
@@ -969,7 +975,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
         # decide_self_consumption applies hysteresis once active (a wider exit
         # threshold than entry) so an EMHASS value oscillating right at the deadband
         # boundary at low overnight load can't flap the mode on every ~2-minute
-        # republish — see SELF_CONSUMPTION_EXIT_MARGIN's docstring in budget.py.
+        # republish — see SELF_CONSUMPTION_EXIT_MARGIN's comment in budget.py (live value: the sc_exit_margin option).
         effective_target = grid_target if not plan_is_stale else 0.0
         effective_mpc_batt = mpc_batt_cmd if not plan_is_stale else 0.0
 
@@ -1115,6 +1121,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             effective_target=effective_target,
             deadband=self._self_consumption_deadband,
             min_dwell_s=self._sc_min_dwell_seconds,
+            exit_margin=self._sc_exit_margin,
             force_exit=limit_breach or not voltx_control or ev_active,
             # A price window decision takes effect at once: the dwell exists to stop an
             # EMHASS target hovering at the deadband from flapping, which this cannot do.
