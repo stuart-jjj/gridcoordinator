@@ -7,7 +7,7 @@ EN = json.loads(
     (Path(__file__).parents[1] / "custom_components/grid_coordinator/translations/en.json").read_text()
 )
 
-PARAM_KEYS = ("sc_min_dwell_seconds",)
+PARAM_KEYS = ("sc_min_dwell_seconds", "sc_exit_margin")
 REMOVED_KEYS = ("sc_battery_tolerance", "sc_discharge_handoff", "sc_power_smoothing_seconds")
 ENTITY_KEY = "entity_voltx_battery_power"
 

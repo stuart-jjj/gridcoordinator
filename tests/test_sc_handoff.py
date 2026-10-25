@@ -8,6 +8,7 @@ from custom_components.grid_coordinator.budget import (
     compute_solax_follow,
     decide_self_consumption,
 )
+from custom_components.grid_coordinator.const import DEFAULT_SC_EXIT_MARGIN
 from custom_components.grid_coordinator.models import SolaxMode
 
 BASE = dict(deadband=50.0, min_dwell_s=120.0)
@@ -31,14 +32,33 @@ def test_does_not_enter_when_target_outside_deadband():
 
 def test_exit_margin_applies_to_target_once_active():
     active = ScState(active=True, last_transition_at=0.0)
-    inside = 50.0 + SELF_CONSUMPTION_EXIT_MARGIN
-    assert decide(active, target=inside).active is True
-    assert decide(active, target=inside + 1).active is False
+    inside = 50.0 + 80.0
+    assert decide(active, target=inside, exit_margin=80.0).active is True
+    assert decide(active, target=inside + 1, exit_margin=80.0).active is False
+
+
+def test_exit_margin_defaults_to_150():
+    # 25 W let a plan hovering around a 200 W deadband flip the Voltx work mode
+    # ~50 times a day (2026-10-19..24); the live default is now 150 W.
+    assert DEFAULT_SC_EXIT_MARGIN == 150
+    active = ScState(active=True, last_transition_at=0.0)
+    assert decide(active, deadband=200.0, target=-297.0).active is True   # held (was an exit)
+    assert decide(active, deadband=200.0, target=350.0).active is True
+    assert decide(active, deadband=200.0, target=351.0).active is False
+
+
+def test_exit_margin_does_not_widen_entry():
+    assert decide(deadband=200.0, target=201.0).active is False
+
+
+def test_legacy_rule_keeps_its_25w_margin():
+    assert SELF_CONSUMPTION_EXIT_MARGIN == 25
 
 
 def test_deadband_zero_has_no_margin():
     active = ScState(active=True, last_transition_at=0.0)
     assert decide(active, deadband=0.0, target=1.0).active is False
+    assert decide(active, deadband=0.0, target=1.0, exit_margin=500.0).active is False
 
 
 # ── dwell, bypass ─────────────────────────────────────────────────────────────

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from .const import DEFAULT_SC_EXIT_MARGIN
 from .models import CoordinatorData, CoordinatorMode, SolaxMode, VoltxDiag
 
 # Voltx modes that mean it has genuinely stopped moving (hard SOC/physical boundary),
@@ -24,6 +25,11 @@ SOLAX_RESIDUAL_MODES = (
 # overnight load otherwise flap the coordinator between self_consumption and
 # emhass_tracking on every ~2-minute republish, toggling a real inverter work-mode
 # write each time (observed 2026-08-09, 00:08-08:42).
+# This 25 W constant is now only the LEGACY rule's (should_hold_self_consumption, the
+# sim baseline). The live rule, decide_self_consumption, takes `exit_margin` from the
+# sc_exit_margin option (default DEFAULT_SC_EXIT_MARGIN = 150 W): at 25 W a plan
+# hovering around a 200 W deadband still flipped the Voltx work mode ~50 times a day
+# (2026-10-19..24).
 SELF_CONSUMPTION_EXIT_MARGIN = 25
 
 
@@ -85,6 +91,7 @@ def decide_self_consumption(
     effective_target: float,
     deadband: float,
     min_dwell_s: float,
+    exit_margin: float = DEFAULT_SC_EXIT_MARGIN,
     force_exit: bool = False,
     bypass_lockout: bool = False,
 ) -> ScState:
@@ -96,6 +103,9 @@ def decide_self_consumption(
     imports to fill the battery, so the earlier charging-shortfall clause could only make
     things worse (live import excursion 2026-10-07 13:36).
 
+    Once active it holds until |effective_target| exceeds `deadband + exit_margin`
+    (no margin when the deadband is 0, which disables the handoff).
+
     After any transition the state is locked for `min_dwell_s`; `force_exit` (safety
     conditions: limit breach, control off) bypasses the lock and forces the handoff off.
     `bypass_lockout` (a stale plan, which zeroes the target) lets the handoff start or
@@ -103,7 +113,7 @@ def decide_self_consumption(
     """
     threshold = deadband
     if state.active and deadband > 0:
-        threshold += SELF_CONSUMPTION_EXIT_MARGIN
+        threshold += exit_margin
     want = abs(effective_target) <= threshold and not force_exit
     if want == state.active:
         return state

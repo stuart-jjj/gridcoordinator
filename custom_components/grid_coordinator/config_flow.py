@@ -54,6 +54,7 @@ from .const import (
     CONF_MPC_SIGN_INVERTED,
     CONF_PLAN_STALE_MINUTES,
     CONF_RAMP_STEP,
+    CONF_SC_EXIT_MARGIN,
     CONF_SC_MIN_DWELL_SECONDS,
     CONF_SELF_CONSUMPTION_DEADBAND,
     CONF_SELF_CONSUMPTION_MODE,
@@ -88,6 +89,7 @@ from .const import (
     DEFAULT_MPC_SIGN_INVERTED,
     DEFAULT_PLAN_STALE_MINUTES,
     DEFAULT_RAMP_STEP,
+    DEFAULT_SC_EXIT_MARGIN,
     DEFAULT_SC_MIN_DWELL_SECONDS,
     DEFAULT_SELF_CONSUMPTION_DEADBAND,
     DEFAULT_SELF_CONSUMPTION_MODE,
@@ -151,6 +153,10 @@ def _params_schema(defaults: dict) -> vol.Schema:
             vol.Required(CONF_SC_MIN_DWELL_SECONDS, default=defaults.get(CONF_SC_MIN_DWELL_SECONDS, DEFAULT_SC_MIN_DWELL_SECONDS)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
                     min=0, max=900, step=10, unit_of_measurement="s", mode=_NUM,
+                )),
+            vol.Required(CONF_SC_EXIT_MARGIN, default=defaults.get(CONF_SC_EXIT_MARGIN, DEFAULT_SC_EXIT_MARGIN)):
+                selector.NumberSelector(selector.NumberSelectorConfig(
+                    min=0, max=1000, step=25, unit_of_measurement="W", mode=_NUM,
                 )),
             vol.Required(CONF_TRACKING_DEADBAND, default=defaults.get(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND)):
                 selector.NumberSelector(selector.NumberSelectorConfig(
@@ -434,6 +440,7 @@ class GridCoordinatorOptionsFlowHandler(OptionsFlow):
             CONF_SELF_CONSUMPTION_MODE: self._current(CONF_SELF_CONSUMPTION_MODE, DEFAULT_SELF_CONSUMPTION_MODE),
             CONF_SELF_CONSUMPTION_DEADBAND: self._current(CONF_SELF_CONSUMPTION_DEADBAND, DEFAULT_SELF_CONSUMPTION_DEADBAND),
             CONF_SC_MIN_DWELL_SECONDS: self._current(CONF_SC_MIN_DWELL_SECONDS, DEFAULT_SC_MIN_DWELL_SECONDS),
+            CONF_SC_EXIT_MARGIN: self._current(CONF_SC_EXIT_MARGIN, DEFAULT_SC_EXIT_MARGIN),
             CONF_TRACKING_DEADBAND: self._current(CONF_TRACKING_DEADBAND, DEFAULT_TRACKING_DEADBAND),
             CONF_TIER2_GAIN: self._current(CONF_TIER2_GAIN, DEFAULT_TIER2_GAIN),
             CONF_GRID_PRIORITY_BAND: self._current(CONF_GRID_PRIORITY_BAND, DEFAULT_GRID_PRIORITY_BAND),
