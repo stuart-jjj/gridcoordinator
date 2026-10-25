@@ -10,6 +10,7 @@ import pytest
 from custom_components.grid_coordinator.const import (
     CONF_ENTITY_SOLAX_CAPACITY,
     CONF_ENTITY_SOLAX_SOC,
+    CONF_ENTITY_SOLAX_SOC_MAX,
     CONF_ENTITY_VOLTX_BATTERY_POWER,
     CONF_ENTITY_VOLTX_CAPACITY,
     ENTITY_ID_DEFAULTS,
@@ -94,6 +95,44 @@ def test_solax_shares_zero_when_capacities_missing():
         solax_on=True, voltx_soc=50.0, mpc_batt=-1000.0, tier2_error=-500.0
     )
     assert (s1, s2, e1, e2) == (0.0, 0.0, 0.0, 0.0)
+
+
+def _near_full_values(solax_soc):
+    return {
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_VOLTX_CAPACITY]: "50",
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_CAPACITY]: "10",
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC]: str(solax_soc),
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC_MAX]: "100",
+    }
+
+
+def test_solax_shares_taper_charge_near_ceiling():
+    # Charging (negative) near the ceiling: taper (100 - 95) / 10 = 0.5.
+    _soc, s1, s2, e1, e2 = _share_coord(_near_full_values(95))._solax_shares(
+        solax_on=True, voltx_soc=95.0, mpc_batt=-1000.0, tier2_error=-500.0
+    )
+    assert e1 == pytest.approx(s1 * 0.5)
+    assert e2 == pytest.approx(s2 * 0.5)
+
+
+def test_solax_shares_no_taper_on_discharge_near_ceiling():
+    # 2026-10-25: Solax at 98 % discharging with Voltx was tapered to ~4 % of the
+    # battery power, so Voltx carried the evening and the SOCs drifted 15 points
+    # apart.  The ceiling taper only protects against overcharging.
+    _soc, s1, s2, e1, e2 = _share_coord(_near_full_values(98))._solax_shares(
+        solax_on=True, voltx_soc=90.0, mpc_batt=2000.0, tier2_error=300.0
+    )
+    assert s1 > 10 / 60  # fuller Solax is asked to work harder
+    assert (e1, e2) == (pytest.approx(s1), pytest.approx(s2))
+
+
+def test_solax_shares_taper_each_tier_by_its_own_direction():
+    # Tier 1 discharging, tier 2 charging: only tier 2 is tapered.
+    _soc, s1, s2, e1, e2 = _share_coord(_near_full_values(95))._solax_shares(
+        solax_on=True, voltx_soc=95.0, mpc_batt=1000.0, tier2_error=-500.0
+    )
+    assert e1 == pytest.approx(s1)
+    assert e2 == pytest.approx(s2 * 0.5)
 
 
 # ── follow: fallback paths release Solax instead of commanding it ─────────────

@@ -422,17 +422,22 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     sensitivity=self._soc_balance_sensitivity,
                     soc_deadband=self._soc_balance_deadband,
                 )
+        # The ceiling taper only guards against overcharging, so it applies to a tier
+        # only while that tier is charging (negative).  Applied on discharge too, it
+        # left a near-full Solax doing almost nothing while Voltx carried the house
+        # (2026-10-25: 98 % vs 83 % after one evening).
+        _taper = 1.0
         if solax_share > 0.0 or solax_tier2_share > 0.0:
             _s_soc_max = _float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0)
             _taper = min(1.0, max(0.0, _s_soc_max - solax_soc) / DEFAULT_SOLAX_TIER1_SOC_TAPER_BAND)
-        else:
-            _taper = 1.0
+        tier1_taper = _taper if mpc_batt < 0 else 1.0
+        tier2_taper = _taper if tier2_error < 0 else 1.0
         return (
             solax_soc,
             solax_share,
             solax_tier2_share,
-            solax_share * _taper,
-            solax_tier2_share * _taper,
+            solax_share * tier1_taper,
+            solax_tier2_share * tier2_taper,
         )
 
     async def _async_solax_follow_voltx(
