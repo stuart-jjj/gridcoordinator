@@ -126,6 +126,33 @@ def decide_self_consumption(
     return ScState(active=want, last_transition_at=now)
 
 
+def voltx_at_limit_with_solax_room(
+    *,
+    voltx_soc: float,
+    voltx_soc_min: float,
+    voltx_soc_max: float,
+    solax_on: bool,
+    solax_soc: float,
+    solax_soc_min: float,
+    solax_soc_max: float,
+) -> bool:
+    """True when Voltx is at an SOC limit that Solax could still work past.
+
+    The handoff must not hold then.  Solax follows Voltx's power, so with Voltx full
+    (or empty) and idle in native self-consumption Solax follows it to 0 W and the
+    surplus is exported (or the deficit imported) while Solax has room — live
+    2026-11-10 16:20, ~2.8 kW exported with Solax at 79 %.  Tracking handles this
+    case: Voltx reports SOC_CEILING / SOC_FLOOR and Solax takes the residual.
+
+    An unreadable Solax SOC (NaN) never blocks: the comparisons are all False.
+    """
+    if not solax_on:
+        return False
+    full = voltx_soc >= voltx_soc_max and solax_soc < solax_soc_max
+    empty = voltx_soc <= voltx_soc_min and solax_soc > solax_soc_min
+    return full or empty
+
+
 def compute_solax_follow(
     *,
     voltx_power: float,

@@ -23,6 +23,7 @@ from .budget import (
     compute_ev_current_limit,
     compute_solax_command,
     compute_solax_follow,
+    voltx_at_limit_with_solax_room,
     compute_solax_share,
     compute_solax_tier1,
     compute_voltx_command,
@@ -438,6 +439,23 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_tier2_share,
             solax_share * tier1_taper,
             solax_tier2_share * tier2_taper,
+        )
+
+    def _voltx_at_limit_with_solax_room(self, *, solax_on: bool, voltx_soc: float) -> bool:
+        """Voltx at an SOC limit Solax could still work past: the handoff must not hold.
+
+        An unavailable Solax SOC reads as NaN (not the usual 50 % default), so it never
+        forces tracking on its own.
+        """
+        hass = self.hass
+        return voltx_at_limit_with_solax_room(
+            voltx_soc=voltx_soc,
+            voltx_soc_min=_float(hass, self._eid(CONF_ENTITY_SOC_MIN), 20.0),
+            voltx_soc_max=_float(hass, self._eid(CONF_ENTITY_SOC_MAX), 95.0),
+            solax_on=solax_on,
+            solax_soc=_float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), float("nan")),
+            solax_soc_min=_float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0),
+            solax_soc_max=_float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0),
         )
 
     async def _async_solax_follow_voltx(
@@ -1118,7 +1136,11 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # Safety conditions bypass the dwell: a limit breach, Voltx control switched off or an
         # EV charging must leave the handoff immediately (the branch has no grid clamp).
+        # So does Voltx sitting at an SOC limit Solax could still work past: Solax follows
+        # Voltx's (zero) power in the handoff, so the surplus would be exported instead
+        # (2026-11-10).  Tracking reports SOC_CEILING / SOC_FLOOR and Solax takes the residual.
         limit_breach = grid_actual > self._import_limit or grid_actual < -self._export_limit
+        voltx_at_limit = self._voltx_at_limit_with_solax_room(solax_on=solax_on, voltx_soc=soc)
         was_active = self._sc_state.active
         self._sc_state = decide_self_consumption(
             state=self._sc_state,
@@ -1127,7 +1149,7 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             deadband=self._self_consumption_deadband,
             min_dwell_s=self._sc_min_dwell_seconds,
             exit_margin=self._sc_exit_margin,
-            force_exit=limit_breach or not voltx_control or ev_active,
+            force_exit=limit_breach or not voltx_control or ev_active or voltx_at_limit,
             # A price window decision takes effect at once: the dwell exists to stop an
             # EMHASS target hovering at the deadband from flapping, which this cannot do.
             bypass_lockout=plan_is_stale or pw_action is not None,

@@ -95,3 +95,24 @@ def test_solax_follow_is_stable_when_socs_are_imbalanced(monkeypatch, native_lag
     assert res.active_ticks > res.ticks * 0.9
     assert res.max_opposing_run <= 3
     assert all(abs(g) < 400 for g in res.grid[-10:])
+
+
+def _voltx_full_surplus(t):
+    # 2026-11-10 16:20: EV stopped, plan target 0 W, ~2.8 kW spare solar, Voltx full.
+    return 2200.0, 5000.0, 0.0, -2147.0, None
+
+
+def test_voltx_full_handoff_exports_the_surplus_without_the_limit_exit():
+    # Reproduces the incident: Solax follows Voltx's 0 W, so the surplus is exported.
+    plant = make_plant(voltx_soc=100.0, solax_soc=79.0)
+    res = run(Policy(legacy=False, exit_at_voltx_limit=False), _voltx_full_surplus, 600, plant=plant)
+    assert res.active_ticks >= res.ticks - 1
+    assert res.export_wh > 400.0  # ~2.8 kW for 10 minutes
+
+
+def test_voltx_full_leaves_handoff_and_solax_absorbs_the_surplus():
+    plant = make_plant(voltx_soc=100.0, solax_soc=79.0)
+    res = run(NEW, _voltx_full_surplus, 600, plant=plant)
+    assert res.active_ticks == 0
+    assert res.solax[-1] < -2500.0  # Solax charging
+    assert res.export_wh < 60.0  # only the first few ticks while Solax ramps

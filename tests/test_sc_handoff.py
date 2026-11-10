@@ -7,6 +7,7 @@ from custom_components.grid_coordinator.budget import (
     ScState,
     compute_solax_follow,
     decide_self_consumption,
+    voltx_at_limit_with_solax_room,
 )
 from custom_components.grid_coordinator.const import DEFAULT_SC_EXIT_MARGIN
 from custom_components.grid_coordinator.models import SolaxMode
@@ -169,3 +170,49 @@ def test_follow_grid_clamp_stops_charging_past_import_ceiling():
         voltx_power=-1500.0, share=0.4, **{**FOLLOW, "grid_actual": 12000.0}
     )
     assert cmd >= 0.0
+
+
+# ── Voltx at an SOC limit with Solax room: the handoff must not hold ──────────
+# 2026-11-10 16:20: Voltx at 100 %, Solax at 79 %, plan target 0 W.  The handoff held,
+# native Voltx could not charge, Solax followed Voltx's 0 W and ~2.8 kW of surplus was
+# exported.  Tracking (SOC_CEILING -> Solax takes the residual) had Solax charging at 3 kW.
+
+LIMITS = dict(
+    voltx_soc_min=20.0, voltx_soc_max=100.0, solax_on=True, solax_soc_min=15.0, solax_soc_max=100.0
+)
+
+
+def at_limit(voltx_soc, solax_soc, **kw):
+    return voltx_at_limit_with_solax_room(
+        voltx_soc=voltx_soc, solax_soc=solax_soc, **{**LIMITS, **kw}
+    )
+
+
+def test_voltx_full_and_solax_has_room_blocks_handoff():
+    assert at_limit(100.0, 79.0) is True
+
+
+def test_voltx_empty_and_solax_has_charge_blocks_handoff():
+    assert at_limit(20.0, 60.0) is True
+
+
+def test_voltx_between_limits_does_not_block():
+    assert at_limit(99.0, 79.0) is False
+    assert at_limit(21.0, 79.0) is False
+
+
+def test_both_full_does_not_block():
+    # Nothing left to absorb a surplus: native self-consumption exporting is correct.
+    assert at_limit(100.0, 100.0) is False
+
+
+def test_both_empty_does_not_block():
+    assert at_limit(20.0, 15.0) is False
+
+
+def test_solax_control_off_does_not_block():
+    assert at_limit(100.0, 50.0, solax_on=False) is False
+
+
+def test_unreadable_solax_soc_does_not_block():
+    assert at_limit(100.0, float("nan")) is False
