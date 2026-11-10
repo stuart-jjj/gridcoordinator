@@ -26,6 +26,7 @@ from custom_components.grid_coordinator.budget import (
     voltx_at_limit_with_solax_room,
 )
 from custom_components.grid_coordinator.const import (
+    DEFAULT_SC_EXIT_MARGIN,
     DEFAULT_IMPORT_LIMIT,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_RAMP_STEP,
@@ -109,6 +110,21 @@ def run(
         load, solar, target, mpc, recorded_power = inputs(t)
         voltx_power = recorded_power if open_loop_power else plant.voltx.power
 
+        # Voltx's SOC limit leaving a surplus/deficit Solax could take (coordinator).
+        at_limit = (
+            not policy.legacy
+            and policy.exit_at_voltx_limit
+            and voltx_at_limit_with_solax_room(
+                voltx_soc=plant.voltx.soc, voltx_soc_min=20.0, voltx_soc_max=95.0,
+                solax_on=True, solax_soc=plant.solax.soc,
+                solax_soc_min=20.0, solax_soc_max=95.0,
+                grid_actual=grid, prev_solax_cmd=solax_last, threshold=policy.deadband,
+            )
+        )
+        # ...and then tracking follows the grid target, not the plan, near a 0 W target.
+        if at_limit and abs(target) <= policy.deadband + DEFAULT_SC_EXIT_MARGIN:
+            mpc = 0.0
+
         s1 = compute_solax_share(
             voltx_soc=plant.voltx.soc, solax_soc=plant.solax.soc,
             voltx_capacity_kwh=plant.voltx.capacity_kwh, solax_capacity_kwh=plant.solax.capacity_kwh,
@@ -137,15 +153,7 @@ def run(
         else:
             state = decide_self_consumption(
                 state=state, now=t, effective_target=target, deadband=policy.deadband,
-                min_dwell_s=policy.min_dwell_s,
-                force_exit=breach or (
-                    policy.exit_at_voltx_limit
-                    and voltx_at_limit_with_solax_room(
-                        voltx_soc=plant.voltx.soc, voltx_soc_min=20.0, voltx_soc_max=95.0,
-                        solax_on=True, solax_soc=plant.solax.soc,
-                        solax_soc_min=20.0, solax_soc_max=95.0,
-                    )
-                ),
+                min_dwell_s=policy.min_dwell_s, force_exit=breach or at_limit,
             )
 
         if state.active:

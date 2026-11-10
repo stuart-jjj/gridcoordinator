@@ -189,21 +189,29 @@ def _limit_values(**overrides):
     return values
 
 
-def _limit_coord(values):
-    c = _coord(values)
+def _limit_coord(values, solax_last=0.0):
+    c = _coord(values, _solax_last_written_cmd=solax_last, _self_consumption_deadband=200.0)
     c._voltx_at_limit_with_solax_room = MethodType(GridCoordinator._voltx_at_limit_with_solax_room, c)
     return c
 
 
-def test_coordinator_voltx_full_solax_room_blocks_handoff():
-    assert _limit_coord(_limit_values())._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0)
+def test_coordinator_voltx_full_exporting_triggers():
+    c = _limit_coord(_limit_values())
+    assert c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0, grid_actual=-2800.0)
 
 
-def test_coordinator_voltx_below_ceiling_does_not_block():
-    assert not _limit_coord(_limit_values())._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=98.0)
+def test_coordinator_holds_on_last_solax_command():
+    c = _limit_coord(_limit_values(), solax_last=-2800.0)
+    assert c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0, grid_actual=0.0)
 
 
-def test_coordinator_unavailable_solax_soc_does_not_block():
+def test_coordinator_voltx_below_ceiling_does_not_trigger():
+    c = _limit_coord(_limit_values())
+    assert not c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=98.0, grid_actual=-2800.0)
+
+
+def test_coordinator_unavailable_solax_soc_does_not_trigger():
     # A missing Solax SOC must not be read as a 50 % default and force tracking.
     values = _limit_values(**{CONF_ENTITY_SOLAX_SOC: "unavailable"})
-    assert not _limit_coord(values)._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0)
+    c = _limit_coord(values)
+    assert not c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0, grid_actual=-2800.0)

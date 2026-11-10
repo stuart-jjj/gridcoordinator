@@ -172,47 +172,74 @@ def test_follow_grid_clamp_stops_charging_past_import_ceiling():
     assert cmd >= 0.0
 
 
-# ── Voltx at an SOC limit with Solax room: the handoff must not hold ──────────
+# ── Voltx's SOC limit leaving a surplus/deficit Solax could take ──────────────
 # 2026-11-10 16:20: Voltx at 100 %, Solax at 79 %, plan target 0 W.  The handoff held,
 # native Voltx could not charge, Solax followed Voltx's 0 W and ~2.8 kW of surplus was
 # exported.  Tracking (SOC_CEILING -> Solax takes the residual) had Solax charging at 3 kW.
 
 LIMITS = dict(
-    voltx_soc_min=20.0, voltx_soc_max=100.0, solax_on=True, solax_soc_min=15.0, solax_soc_max=100.0
+    voltx_soc_min=20.0, voltx_soc_max=100.0, solax_on=True, solax_soc_min=15.0,
+    solax_soc_max=100.0, threshold=200.0,
 )
 
 
-def at_limit(voltx_soc, solax_soc, **kw):
+def at_limit(voltx_soc, solax_soc, grid=0.0, solax_cmd=0.0, **kw):
     return voltx_at_limit_with_solax_room(
-        voltx_soc=voltx_soc, solax_soc=solax_soc, **{**LIMITS, **kw}
+        voltx_soc=voltx_soc, solax_soc=solax_soc, grid_actual=grid,
+        prev_solax_cmd=solax_cmd, **{**LIMITS, **kw}
     )
 
 
-def test_voltx_full_and_solax_has_room_blocks_handoff():
-    assert at_limit(100.0, 79.0) is True
+def test_voltx_full_exporting_with_solax_room_triggers():
+    assert at_limit(100.0, 79.0, grid=-2800.0) is True
 
 
-def test_voltx_empty_and_solax_has_charge_blocks_handoff():
-    assert at_limit(20.0, 60.0) is True
+def test_voltx_empty_importing_with_solax_charge_triggers():
+    assert at_limit(20.0, 60.0, grid=1500.0) is True
 
 
-def test_voltx_between_limits_does_not_block():
-    assert at_limit(99.0, 79.0) is False
-    assert at_limit(21.0, 79.0) is False
+def test_voltx_full_with_house_in_deficit_does_not_trigger():
+    # Native self-consumption discharges a full Voltx fine; forcing tracking would
+    # have Solax cover the deficit while Voltx idles (Copilot review, PR #50).
+    assert at_limit(100.0, 79.0, grid=800.0) is False
 
 
-def test_both_full_does_not_block():
+def test_voltx_empty_with_surplus_does_not_trigger():
+    assert at_limit(20.0, 60.0, grid=-800.0) is False
+
+
+def test_small_export_within_threshold_does_not_trigger():
+    assert at_limit(100.0, 79.0, grid=-150.0) is False
+
+
+def test_holds_while_solax_is_absorbing_the_surplus():
+    # Tracking has brought the grid to ~0 with Solax charging: stay out of the handoff,
+    # or it re-enters, Solax follows Voltx to 0 W and the export returns.
+    assert at_limit(100.0, 79.0, grid=-20.0, solax_cmd=-2800.0) is True
+    assert at_limit(20.0, 60.0, grid=20.0, solax_cmd=1500.0) is True
+
+
+def test_releases_once_solax_work_falls_inside_threshold():
+    assert at_limit(100.0, 79.0, grid=-20.0, solax_cmd=-150.0) is False
+
+
+def test_voltx_between_limits_does_not_trigger():
+    assert at_limit(99.0, 79.0, grid=-2800.0) is False
+    assert at_limit(21.0, 79.0, grid=1500.0) is False
+
+
+def test_both_full_does_not_trigger():
     # Nothing left to absorb a surplus: native self-consumption exporting is correct.
-    assert at_limit(100.0, 100.0) is False
+    assert at_limit(100.0, 100.0, grid=-2800.0) is False
 
 
-def test_both_empty_does_not_block():
-    assert at_limit(20.0, 15.0) is False
+def test_both_empty_does_not_trigger():
+    assert at_limit(20.0, 15.0, grid=1500.0) is False
 
 
-def test_solax_control_off_does_not_block():
-    assert at_limit(100.0, 50.0, solax_on=False) is False
+def test_solax_control_off_does_not_trigger():
+    assert at_limit(100.0, 50.0, grid=-2800.0, solax_on=False) is False
 
 
-def test_unreadable_solax_soc_does_not_block():
-    assert at_limit(100.0, float("nan")) is False
+def test_unreadable_solax_soc_does_not_trigger():
+    assert at_limit(100.0, float("nan"), grid=-2800.0) is False

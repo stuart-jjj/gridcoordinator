@@ -441,8 +441,10 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_tier2_share * tier2_taper,
         )
 
-    def _voltx_at_limit_with_solax_room(self, *, solax_on: bool, voltx_soc: float) -> bool:
-        """Voltx at an SOC limit Solax could still work past: the handoff must not hold.
+    def _voltx_at_limit_with_solax_room(
+        self, *, solax_on: bool, voltx_soc: float, grid_actual: float
+    ) -> bool:
+        """Voltx's SOC limit is leaving a surplus/deficit Solax could take: leave the handoff.
 
         An unavailable Solax SOC reads as NaN (not the usual 50 % default), so it never
         forces tracking on its own.
@@ -456,6 +458,9 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             solax_soc=_float(hass, self._eid(CONF_ENTITY_SOLAX_SOC), float("nan")),
             solax_soc_min=_float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MIN), 20.0),
             solax_soc_max=_float_or_entity(hass, self._eid(CONF_ENTITY_SOLAX_SOC_MAX), 95.0),
+            grid_actual=grid_actual,
+            prev_solax_cmd=self._solax_last_written_cmd,
+            threshold=self._self_consumption_deadband,
         )
 
     async def _async_solax_follow_voltx(
@@ -1136,11 +1141,14 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
 
         # Safety conditions bypass the dwell: a limit breach, Voltx control switched off or an
         # EV charging must leave the handoff immediately (the branch has no grid clamp).
-        # So does Voltx sitting at an SOC limit Solax could still work past: Solax follows
-        # Voltx's (zero) power in the handoff, so the surplus would be exported instead
-        # (2026-11-10).  Tracking reports SOC_CEILING / SOC_FLOOR and Solax takes the residual.
+        # So does Voltx's SOC limit leaving a surplus (deficit) Solax could take: Solax
+        # follows Voltx's (zero) power in the handoff, so it would be exported (imported)
+        # instead (2026-11-10).  Tracking reports SOC_CEILING / SOC_FLOOR and Solax takes
+        # the residual.
         limit_breach = grid_actual > self._import_limit or grid_actual < -self._export_limit
-        voltx_at_limit = self._voltx_at_limit_with_solax_room(solax_on=solax_on, voltx_soc=soc)
+        voltx_at_limit = self._voltx_at_limit_with_solax_room(
+            solax_on=solax_on, voltx_soc=soc, grid_actual=grid_actual
+        )
         was_active = self._sc_state.active
         self._sc_state = decide_self_consumption(
             state=self._sc_state,
@@ -1193,6 +1201,17 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 solax_command=solax_cmd,
                 solax_mode=solax_mode,
             )
+
+        # Left the handoff because Voltx's SOC limit is leaving a surplus/deficit: track the
+        # grid target, not the battery plan (as for a stale plan).  An opposing plan would
+        # otherwise drive Voltx the unblocked way — discharging into an export at its
+        # ceiling, or importing to charge at its floor — and, not being SOC-bound, take
+        # Solax off its full-residual path.  A price window's setpoint stays in charge, and
+        # so does a plan whose target is outside the handoff band (e.g. a deliberate export
+        # from a full Voltx — the export there is the plan, not an unmet surplus).
+        handoff_band = self._self_consumption_deadband + self._sc_exit_margin
+        if voltx_at_limit and pw_action is None and abs(effective_target) <= handoff_band:
+            effective_mpc_batt = 0.0
 
         # ── read battery / inverter state ──────────────────────────────────
         soc_min = _float(hass, entity_soc_min, 20.0)

@@ -135,21 +135,32 @@ def voltx_at_limit_with_solax_room(
     solax_soc: float,
     solax_soc_min: float,
     solax_soc_max: float,
+    grid_actual: float,
+    prev_solax_cmd: float,
+    threshold: float,
 ) -> bool:
-    """True when Voltx is at an SOC limit that Solax could still work past.
+    """True when Voltx's SOC limit is leaving a surplus (deficit) that Solax could take.
 
-    The handoff must not hold then.  Solax follows Voltx's power, so with Voltx full
-    (or empty) and idle in native self-consumption Solax follows it to 0 W and the
-    surplus is exported (or the deficit imported) while Solax has room — live
-    2026-11-10 16:20, ~2.8 kW exported with Solax at 79 %.  Tracking handles this
-    case: Voltx reports SOC_CEILING / SOC_FLOOR and Solax takes the residual.
+    The handoff must not hold then.  Solax follows Voltx's power, so with Voltx full and
+    idle in native self-consumption Solax follows it to 0 W and the surplus is exported
+    while Solax has room (live 2026-11-10 16:20: ~2.8 kW exported, Solax at 79 %).
+    Tracking handles this: Voltx reports SOC_CEILING / SOC_FLOOR and Solax takes the
+    residual.
 
-    An unreadable Solax SOC (NaN) never blocks: the comparisons are all False.
+    Direction-specific, so a handoff that still works is left alone: Voltx full with
+    the house in deficit discharges natively (forcing tracking there would drain Solax
+    while Voltx idles).  It is true only while the blocked direction is in use: the
+    grid shows the unmet surplus (export) / deficit (import) beyond `threshold`, or
+    Solax's last command is already absorbing (charging) / covering (discharging) more
+    than `threshold` — the latter keeps tracking from handing straight back once Solax
+    has brought the grid to target.  An unreadable Solax SOC (NaN) never triggers it.
     """
     if not solax_on:
         return False
-    full = voltx_soc >= voltx_soc_max and solax_soc < solax_soc_max
-    empty = voltx_soc <= voltx_soc_min and solax_soc > solax_soc_min
+    surplus = grid_actual < -threshold or prev_solax_cmd < -threshold
+    deficit = grid_actual > threshold or prev_solax_cmd > threshold
+    full = voltx_soc >= voltx_soc_max and solax_soc < solax_soc_max and surplus
+    empty = voltx_soc <= voltx_soc_min and solax_soc > solax_soc_min and deficit
     return full or empty
 
 
