@@ -10,7 +10,10 @@ import pytest
 from custom_components.grid_coordinator.const import (
     CONF_ENTITY_SOLAX_CAPACITY,
     CONF_ENTITY_SOLAX_SOC,
+    CONF_ENTITY_SOC_MAX,
+    CONF_ENTITY_SOC_MIN,
     CONF_ENTITY_SOLAX_SOC_MAX,
+    CONF_ENTITY_SOLAX_SOC_MIN,
     CONF_ENTITY_VOLTX_BATTERY_POWER,
     CONF_ENTITY_VOLTX_CAPACITY,
     ENTITY_ID_DEFAULTS,
@@ -170,3 +173,45 @@ def test_follow_does_not_touch_an_inactive_solax_when_unavailable():
     result, release = _follow(True, False, solax_on=True, voltx_power=None, voltx_soc=50.0, grid_actual=0.0)
     assert result == (0.0, SolaxMode.SELF_CONSUMPTION)
     release.assert_not_awaited()
+
+
+# ── Voltx at an SOC limit with Solax room (reads the limit entities) ──────────
+
+def _limit_values(**overrides):
+    values = {
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOC_MIN]: "20",
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOC_MAX]: "100",
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC]: "79",
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC_MIN]: "14",
+        ENTITY_ID_DEFAULTS[CONF_ENTITY_SOLAX_SOC_MAX]: "100",
+    }
+    values.update({ENTITY_ID_DEFAULTS[k]: v for k, v in overrides.items()})
+    return values
+
+
+def _limit_coord(values, solax_last=0.0):
+    c = _coord(values, _solax_last_written_cmd=solax_last, _self_consumption_deadband=200.0)
+    c._voltx_at_limit_with_solax_room = MethodType(GridCoordinator._voltx_at_limit_with_solax_room, c)
+    return c
+
+
+def test_coordinator_voltx_full_exporting_triggers():
+    c = _limit_coord(_limit_values())
+    assert c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0, grid_actual=-2800.0)
+
+
+def test_coordinator_holds_on_last_solax_command():
+    c = _limit_coord(_limit_values(), solax_last=-2800.0)
+    assert c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0, grid_actual=0.0)
+
+
+def test_coordinator_voltx_below_ceiling_does_not_trigger():
+    c = _limit_coord(_limit_values())
+    assert not c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=98.0, grid_actual=-2800.0)
+
+
+def test_coordinator_unavailable_solax_soc_does_not_trigger():
+    # A missing Solax SOC must not be read as a 50 % default and force tracking.
+    values = _limit_values(**{CONF_ENTITY_SOLAX_SOC: "unavailable"})
+    c = _limit_coord(values)
+    assert not c._voltx_at_limit_with_solax_room(solax_on=True, voltx_soc=100.0, grid_actual=-2800.0)

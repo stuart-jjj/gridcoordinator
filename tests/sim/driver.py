@@ -14,15 +14,19 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from custom_components.grid_coordinator.budget import (
+    SOLAX_RESIDUAL_MODES,
     ScState,
+    compute_solax_command,
     compute_solax_follow,
     compute_solax_share,
     compute_solax_tier1,
     compute_voltx_command,
     decide_self_consumption,
     should_hold_self_consumption,
+    voltx_at_limit_with_solax_room,
 )
 from custom_components.grid_coordinator.const import (
+    DEFAULT_SC_EXIT_MARGIN,
     DEFAULT_IMPORT_LIMIT,
     DEFAULT_EXPORT_LIMIT,
     DEFAULT_RAMP_STEP,
@@ -46,6 +50,7 @@ class Policy:
     deadband: float = 200.0
     min_dwell_s: float = 120.0
     solax_follow: bool = True
+    exit_at_voltx_limit: bool = True  # leave the handoff while Voltx is at an SOC limit Solax is not
 
 
 LEGACY = Policy(legacy=True, solax_follow=False)
@@ -105,6 +110,21 @@ def run(
         load, solar, target, mpc, recorded_power = inputs(t)
         voltx_power = recorded_power if open_loop_power else plant.voltx.power
 
+        # Voltx's SOC limit leaving a surplus/deficit Solax could take (coordinator).
+        at_limit = (
+            not policy.legacy
+            and policy.exit_at_voltx_limit
+            and voltx_at_limit_with_solax_room(
+                voltx_soc=plant.voltx.soc, voltx_soc_min=20.0, voltx_soc_max=95.0,
+                solax_on=True, solax_soc=plant.solax.soc,
+                solax_soc_min=20.0, solax_soc_max=95.0,
+                grid_actual=grid, prev_solax_cmd=solax_last, threshold=policy.deadband,
+            )
+        )
+        # ...and then tracking follows the grid target, not the plan, near a 0 W target.
+        if at_limit and abs(target) <= policy.deadband + DEFAULT_SC_EXIT_MARGIN:
+            mpc = 0.0
+
         s1 = compute_solax_share(
             voltx_soc=plant.voltx.soc, solax_soc=plant.solax.soc,
             voltx_capacity_kwh=plant.voltx.capacity_kwh, solax_capacity_kwh=plant.solax.capacity_kwh,
@@ -133,7 +153,7 @@ def run(
         else:
             state = decide_self_consumption(
                 state=state, now=t, effective_target=target, deadband=policy.deadband,
-                min_dwell_s=policy.min_dwell_s, force_exit=breach,
+                min_dwell_s=policy.min_dwell_s, force_exit=breach or at_limit,
             )
 
         if state.active:
@@ -150,7 +170,7 @@ def run(
                 solax_cmd, solax_mode = 0.0, SolaxMode.SELF_CONSUMPTION
             prev_cmd = 0.0
         else:
-            voltx_cmd, _mode, _diag = compute_voltx_command(
+            voltx_cmd, voltx_mode, _diag = compute_voltx_command(
                 grid_actual=grid, grid_target=target, mpc_batt_cmd=voltx_setpoint,
                 prev_cmd=prev_cmd, soc=plant.voltx.soc, soc_min=20.0, soc_max=95.0,
                 max_charge=5000.0, max_discharge=5000.0, import_limit=DEFAULT_IMPORT_LIMIT,
@@ -159,14 +179,24 @@ def run(
                 tier2_gain=DEFAULT_TIER2_GAIN * (1.0 - s2),
             )
             grid_after_voltx = grid + prev_cmd - voltx_cmd
-            solax_cmd, solax_mode = compute_solax_tier1(
-                mpc_batt_cmd=mpc, share=s1, solax_soc=plant.solax.soc,
-                solax_soc_min=20.0, solax_soc_max=95.0, solax_max_charge=3000.0,
-                solax_max_discharge=3000.0, grid_after_voltx=grid_after_voltx,
-                import_limit=DEFAULT_IMPORT_LIMIT, export_limit=DEFAULT_EXPORT_LIMIT,
-                prev_solax_cmd=solax_last,
-                tier2_term=DEFAULT_TIER2_GAIN * s2 * (grid - target),
-            )
+            if voltx_mode in SOLAX_RESIDUAL_MODES:
+                # Voltx stopped at a hard limit: Solax takes the full residual (coordinator).
+                solax_cmd, solax_mode = compute_solax_command(
+                    voltx_mode=voltx_mode, grid_after_voltx=grid_after_voltx,
+                    grid_target=target, solax_soc=plant.solax.soc,
+                    solax_soc_min=20.0, solax_soc_max=95.0, solax_max_charge=3000.0,
+                    solax_max_discharge=3000.0, import_limit=DEFAULT_IMPORT_LIMIT,
+                    export_limit=DEFAULT_EXPORT_LIMIT, prev_solax_cmd=solax_last,
+                )
+            else:
+                solax_cmd, solax_mode = compute_solax_tier1(
+                    mpc_batt_cmd=mpc, share=s1, solax_soc=plant.solax.soc,
+                    solax_soc_min=20.0, solax_soc_max=95.0, solax_max_charge=3000.0,
+                    solax_max_discharge=3000.0, grid_after_voltx=grid_after_voltx,
+                    import_limit=DEFAULT_IMPORT_LIMIT, export_limit=DEFAULT_EXPORT_LIMIT,
+                    prev_solax_cmd=solax_last,
+                    tier2_term=DEFAULT_TIER2_GAIN * s2 * (grid - target),
+                )
             prev_cmd = voltx_cmd
         solax_last = solax_cmd
 

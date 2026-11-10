@@ -95,3 +95,75 @@ def test_solax_follow_is_stable_when_socs_are_imbalanced(monkeypatch, native_lag
     assert res.active_ticks > res.ticks * 0.9
     assert res.max_opposing_run <= 3
     assert all(abs(g) < 400 for g in res.grid[-10:])
+
+
+def _voltx_full_surplus(t):
+    # 2026-11-10 16:20: EV stopped, plan target 0 W, ~2.8 kW spare solar, Voltx full.
+    return 2200.0, 5000.0, 0.0, -2147.0, None
+
+
+def test_voltx_full_handoff_exports_the_surplus_without_the_limit_exit():
+    # Reproduces the incident: Solax follows Voltx's 0 W, so the surplus is exported.
+    plant = make_plant(voltx_soc=100.0, solax_soc=79.0)
+    res = run(Policy(legacy=False, exit_at_voltx_limit=False), _voltx_full_surplus, 600, plant=plant)
+    assert res.active_ticks >= res.ticks - 1
+    assert res.export_wh > 400.0  # ~2.8 kW for 10 minutes
+
+
+def test_voltx_full_leaves_handoff_and_solax_absorbs_the_surplus():
+    plant = make_plant(voltx_soc=100.0, solax_soc=50.0)  # room for 30 min of surplus
+    res = run(NEW, _voltx_full_surplus, 1800, plant=plant)
+    assert res.solax[-1] < -2500.0  # Solax charging
+    assert res.export_wh < 60.0  # only the first few ticks
+    # No cycle of re-entering the handoff once Solax has the grid at target.
+    assert res.transitions <= 2
+    assert sum(res.active[-150:]) == 0
+
+
+def test_voltx_full_with_house_in_deficit_stays_in_the_handoff():
+    # Evening: Voltx full, load above solar.  Native Voltx discharges; Solax is not
+    # made to carry the deficit while Voltx idles (Copilot review, PR #50).
+    def inputs(t):
+        return 3000.0, 1000.0, 0.0, 0.0, None
+
+    plant = make_plant(voltx_soc=100.0, solax_soc=79.0)
+    res = run(NEW, inputs, 600, plant=plant)
+    assert res.active_ticks >= res.ticks - 1
+    assert res.voltx[-1] > 1500.0  # Voltx discharging
+    assert res.import_wh < 30.0
+
+
+def test_voltx_full_surplus_with_opposing_discharge_plan_does_not_discharge_voltx():
+    # Plan wants a discharge at a 0 W target while there is a real surplus: tracking
+    # follows the grid target, so Voltx is not discharged into the export.
+    def inputs(t):
+        return 2200.0, 5000.0, 0.0, 1500.0, None
+
+    plant = make_plant(voltx_soc=100.0, solax_soc=79.0)
+    res = run(NEW, inputs, 600, plant=plant)
+    assert max(res.voltx[3:]) <= 0.0
+    assert res.solax[-1] < -2500.0
+    assert res.export_wh < 60.0
+
+
+def test_voltx_empty_deficit_with_charge_plan_does_not_import_to_charge():
+    # Voltx at its floor, plan wants a charge, but load exceeds solar: Solax covers the
+    # deficit and Voltx does not import to follow the plan.
+    def inputs(t):
+        return 2500.0, 800.0, 0.0, -1500.0, None
+
+    plant = make_plant(voltx_soc=20.0, solax_soc=60.0)
+    res = run(NEW, inputs, 600, plant=plant)
+    assert min(res.voltx[3:]) >= 0.0
+    assert res.solax[-1] > 1500.0
+    assert res.import_wh < 30.0
+
+
+def test_voltx_full_planned_export_still_discharges_voltx():
+    # A deliberate export from a full Voltx is outside the handoff band: the plan stands.
+    def inputs(t):
+        return 1000.0, 1000.0, -3000.0, 3000.0, None
+
+    plant = make_plant(voltx_soc=100.0, solax_soc=79.0)
+    res = run(NEW, inputs, 300, plant=plant)
+    assert res.voltx[-1] > 1500.0
