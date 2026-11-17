@@ -623,7 +623,7 @@ def test_tracking_closes_the_whole_gap_when_the_readings_agree():
 
 # ── hold passes the plan's charge through (ADO 333) ───────────────────────────
 
-_HOLD = dict(import_limit=12000.0, headroom_reserve=0.0, max_charge=12600.0)
+_HOLD = dict(grid_uncontrolled=800.0, import_limit=12000.0, headroom_reserve=0.0, max_charge=12600.0)
 
 
 @pytest.mark.parametrize("code", ["hold_below_min_price", "hold_outranked", "hold_no_surplus"])
@@ -656,11 +656,20 @@ def test_hold_keeps_soaking_up_more_solar_than_the_plan_charges():
 
 
 def test_hold_plan_charge_never_targets_more_than_the_import_limit_allows():
-    hold = dict(_HOLD, headroom_reserve=3000.0, max_charge=9000.0)
+    # 12 kW import limit less 3 kW reserved, with an 800 W house: 8.2 kW of charge.
+    hold = dict(_HOLD, headroom_reserve=3000.0)
     assert hold_with_plan_charge(
         "hold_below_min_price", grid_target=0.0, setpoint=800.0,
         plan_grid_target=12800.0, plan_battery=-12000.0, **hold,
-    ) == (9000.0, -9000.0)
+    ) == (9000.0, -8200.0)
+
+
+def test_hold_plan_charge_is_capped_by_what_the_batteries_can_take():
+    hold = dict(_HOLD, max_charge=5000.0)
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=800.0,
+        plan_grid_target=6800.0, plan_battery=-6000.0, **hold,
+    ) == (6800.0, -5000.0)
 
 
 def test_hold_plan_charge_never_targets_less_import_than_the_hold():
@@ -678,3 +687,13 @@ def test_hold_already_at_the_plan_charge_keeps_the_plan_target():
         "hold_below_min_price", grid_target=0.0, setpoint=-6000.0,
         plan_grid_target=6800.0, plan_battery=-6000.0, **_HOLD,
     ) == (6800.0, -6000.0)
+
+
+@pytest.mark.parametrize("plan_battery", [0.0, 300.0])
+def test_hold_keeps_carrying_the_house_for_an_idle_or_small_discharge_plan(plan_battery):
+    # PR 52 review: 0 W (idle, or a stale plan zeroed) or a 300 W discharge is not a
+    # charge plan, and must not stop the batteries carrying an 800 W house.
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=800.0,
+        plan_grid_target=500.0, plan_battery=plan_battery, **_HOLD,
+    ) == (0.0, 800.0)

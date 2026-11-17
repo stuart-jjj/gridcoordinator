@@ -745,6 +745,18 @@ def test_hold_charges_with_the_plan_through_late_batteries_and_meters(voltx_dela
     assert not rig.c._sc_state.active
 
 
+@pytest.mark.parametrize("voltx_delay", [0, 1, 3])
+@pytest.mark.parametrize("meter_lag", [0, 1, 2])
+def test_hold_with_a_plan_charge_at_the_import_limit_never_passes_it(voltx_delay, meter_lag):
+    # PR 52 review: a plan that charges 12 kW with an 800 W house would import 12.8 kW.
+    rig = Rig()
+    _plan_charge(rig, battery=-12000, grid=12800)
+    # The import-heavy estimate dips the charge while readings lag; it settles in ~30 ticks.
+    grids = _closed_loop(rig, [HOLD_PRICES] * 40, voltx_delay=voltx_delay, solax_delay=1, meter_lag=meter_lag)
+    assert max(grids) <= 12000 + 20
+    assert grids[-1] == pytest.approx(12000, abs=100)
+
+
 # ── a brief hold does not interrupt export ────────────────────────────────────
 
 

@@ -532,6 +532,7 @@ def hold_with_plan_charge(
     setpoint: float,
     plan_grid_target: float,
     plan_battery: float,
+    grid_uncontrolled: float,
     import_limit: float,
     headroom_reserve: float,
     max_charge: float,
@@ -543,13 +544,17 @@ def hold_with_plan_charge(
     For the codes in HOLD_CODES_PASSING_PLAN_CHARGE the batteries charge as hard as
     the plan when it charges harder than the hold would (+ = discharge), and the grid
     target rises to the plan's import, never past the import limit less the reserved
-    headroom and never below the hold's own target.  A plan discharge is not followed.
-    A setpoint equal to the plan's charge counts as the plan's: tracking ticks start
-    from what was commanded, so once the plan is commanded the two agree.
+    headroom and never below the hold's own target.  The charge is bounded so that
+    `grid_uncontrolled` (the house with the batteries' output added back; pass the
+    most import-heavy estimate while readings lag) stays within that limit.  Only a
+    charge plan is followed: an idle or discharging plan (or a stale one, zeroed)
+    leaves the hold carrying the house.  A setpoint equal to the plan's charge counts
+    as the plan's: tracking ticks start from what was commanded, so once the plan is
+    commanded the two agree.
     """
-    if code not in HOLD_CODES_PASSING_PLAN_CHARGE or plan_battery > setpoint:
+    if code not in HOLD_CODES_PASSING_PLAN_CHARGE or plan_battery >= 0 or plan_battery > setpoint:
         return grid_target, setpoint
-    battery = max(-max_charge, plan_battery)
+    battery = max(-max_charge, plan_battery, grid_uncontrolled - (import_limit - headroom_reserve))
     target = max(grid_target, min(plan_grid_target, import_limit - headroom_reserve))
     return target, min(setpoint, battery)
 

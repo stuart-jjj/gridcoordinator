@@ -1082,12 +1082,13 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
             if self._sc_state.active and voltx_done and voltx_power_raw is not None:
                 self._prev_cmd = voltx_power_raw
 
+            # The uncontrolled grid power (the meter plus what the batteries are doing).
+            # Where commanded and seen disagree, either may be the stale one.
+            candidates = [grid_actual + v + x for v in (voltx_low, voltx_high) for x in (solax_low, solax_high)]
             if pw_changed or self._pw_setpoint is None:
                 # First tick of an action: one direct step from the uncontrolled grid
-                # power (the meter plus what the batteries are doing).  Where commanded
-                # and seen disagree, either may be the stale one, so take whichever
-                # keeps the step inside the limit this action works at.
-                candidates = [grid_actual + v + x for v in (voltx_low, voltx_high) for x in (solax_low, solax_high)]
+                # power, taking whichever estimate keeps the step inside the limit this
+                # action works at.
                 if pw_action == ACTION_CHARGE:
                     grid_uncontrolled = max(candidates)
                 elif pw_action == ACTION_EXPORT:
@@ -1147,12 +1148,15 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     setpoint=hold_setpoint,
                     plan_grid_target=effective_target,
                     plan_battery=effective_mpc_batt,
+                    # The most import-heavy estimate, as for charge: a lagging battery or
+                    # meter must not let the plan's charge push import past the limit.
+                    grid_uncontrolled=max(candidates),
                     import_limit=self._import_limit,
                     headroom_reserve=ev_reserve,
                     max_charge=pw_max_charge,
                 )
                 passed = 0.0
-                if pw.code in HOLD_CODES_PASSING_PLAN_CHARGE and effective_mpc_batt <= hold_setpoint:
+                if pw.code in HOLD_CODES_PASSING_PLAN_CHARGE and effective_mpc_batt < 0 and effective_mpc_batt <= hold_setpoint:
                     passed = max(0.0, -mpc_batt_cmd)
                 blocked = 0.0
                 if pw.code not in HOLD_CODES_PASSING_PLAN_CHARGE and effective_mpc_batt < min(0.0, hold_setpoint):
