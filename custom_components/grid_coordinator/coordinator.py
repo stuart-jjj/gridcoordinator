@@ -176,11 +176,13 @@ from .price_window import (
     CODE_DISABLED,
     CODE_EXPORT_CARRIED,
     CODE_HOLD_BELOW_MIN_PRICE,
+    HOLD_CODES_PASSING_PLAN_CHARGE,
     PriceWindowDecision,
     PriceWindowEnergy,
     PriceWindowLimits,
     PriceWindowSettings,
     decide_price_window,
+    hold_with_plan_charge,
     inactive,
     parse_amber_express,
     split_setpoint,
@@ -889,7 +891,8 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                 self._pw_export_at = None
         elif data.mode in _UNBOUND_MODES:
             data = replace(data, mode=_PRICE_WINDOW_MODES[decision.action])
-        return replace(data, price_window=decision)
+        # The tick may have added to the decision (a hold passing the plan's charge).
+        return replace(data, price_window=self._pw_decision)
 
     async def _async_tick(self) -> CoordinatorData:
         """One control tick: disabled gate, manual override, price window, EMHASS."""
@@ -1132,6 +1135,30 @@ class GridCoordinator(DataUpdateCoordinator[CoordinatorData]):
                     ramp_step=self._ramp_step,
                     max_discharge=pw_max_discharge,
                     max_charge=pw_max_charge,
+                )
+            if pw_action == ACTION_HOLD:
+                # A hold keeps the batteries for the spike; it is no reason to stop the
+                # plan charging them (ADO 333).  effective_* are still the plan's here
+                # (zero when it is stale).
+                hold_setpoint = mpc_batt_cmd
+                grid_target, mpc_batt_cmd = hold_with_plan_charge(
+                    pw.code,
+                    grid_target=grid_target,
+                    setpoint=hold_setpoint,
+                    plan_grid_target=effective_target,
+                    plan_battery=effective_mpc_batt,
+                    import_limit=self._import_limit,
+                    headroom_reserve=ev_reserve,
+                    max_charge=pw_max_charge,
+                )
+                passed = 0.0
+                if pw.code in HOLD_CODES_PASSING_PLAN_CHARGE and effective_mpc_batt <= hold_setpoint:
+                    passed = max(0.0, -mpc_batt_cmd)
+                blocked = 0.0
+                if pw.code not in HOLD_CODES_PASSING_PLAN_CHARGE and effective_mpc_batt < min(0.0, hold_setpoint):
+                    blocked = -effective_mpc_batt
+                self._pw_decision = replace(
+                    pw, plan_charge_passed_w=round(passed, 1), plan_charge_blocked_w=round(blocked, 1)
                 )
             self._pw_setpoint = mpc_batt_cmd
             plan_is_stale = False
