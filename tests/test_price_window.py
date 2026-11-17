@@ -15,6 +15,7 @@ from custom_components.grid_coordinator.price_window import (
     PriceWindowSettings,
     decide_price_window,
     decision_attributes,
+    hold_with_plan_charge,
     parse_amber_express,
     split_setpoint,
     track_setpoint,
@@ -618,3 +619,81 @@ def test_tracking_closes_the_whole_gap_when_the_readings_agree():
                           readings_current=True, **agreed) == 11050.0
     assert track_setpoint(ACTION_EXPORT, 1800.0, grid_actual=750.0, grid_target=-10000.0,
                           readings_current=False, **agreed) == 1800.0
+
+
+# ── hold passes the plan's charge through (ADO 333) ───────────────────────────
+
+_HOLD = dict(grid_uncontrolled=800.0, import_limit=12000.0, headroom_reserve=0.0, max_charge=12600.0)
+
+
+@pytest.mark.parametrize("code", ["hold_below_min_price", "hold_outranked", "hold_no_surplus"])
+def test_hold_charges_as_hard_as_the_plan(code):
+    # House 800 W, the batteries carrying it; the plan charges 6 kW, importing 6.8 kW.
+    assert hold_with_plan_charge(
+        code, grid_target=0.0, setpoint=800.0, plan_grid_target=6800.0, plan_battery=-6000.0, **_HOLD
+    ) == (6800.0, -6000.0)
+
+
+@pytest.mark.parametrize("code", ["hold_charge_too_dear", "hold_soc_ceiling"])
+def test_hold_that_rules_out_charging_ignores_the_plan(code):
+    assert hold_with_plan_charge(
+        code, grid_target=0.0, setpoint=800.0, plan_grid_target=6800.0, plan_battery=-6000.0, **_HOLD
+    ) == (0.0, 800.0)
+
+
+def test_hold_does_not_follow_a_plan_discharge():
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=800.0,
+        plan_grid_target=-2200.0, plan_battery=3000.0, **_HOLD,
+    ) == (0.0, 800.0)
+
+
+def test_hold_keeps_soaking_up_more_solar_than_the_plan_charges():
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=-8000.0,
+        plan_grid_target=0.0, plan_battery=-6000.0, **_HOLD,
+    ) == (0.0, -8000.0)
+
+
+def test_hold_plan_charge_never_targets_more_than_the_import_limit_allows():
+    # 12 kW import limit less 3 kW reserved, with an 800 W house: 8.2 kW of charge.
+    hold = dict(_HOLD, headroom_reserve=3000.0)
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=800.0,
+        plan_grid_target=12800.0, plan_battery=-12000.0, **hold,
+    ) == (9000.0, -8200.0)
+
+
+def test_hold_plan_charge_is_capped_by_what_the_batteries_can_take():
+    hold = dict(_HOLD, max_charge=5000.0)
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=800.0,
+        plan_grid_target=6800.0, plan_battery=-6000.0, **hold,
+    ) == (6800.0, -5000.0)
+
+
+def test_hold_plan_charge_never_targets_less_import_than_the_hold():
+    # The EV's 7 kW stays on the grid during a hold; the plan's own target is lower.
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=7000.0, setpoint=800.0,
+        plan_grid_target=1000.0, plan_battery=-2000.0, **_HOLD,
+    ) == (7000.0, -2000.0)
+
+
+def test_hold_already_at_the_plan_charge_keeps_the_plan_target():
+    # Tracking ticks start from what was commanded: once the plan's charge is
+    # commanded the hold setpoint equals it, and the target must not fall back to 0.
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=-6000.0,
+        plan_grid_target=6800.0, plan_battery=-6000.0, **_HOLD,
+    ) == (6800.0, -6000.0)
+
+
+@pytest.mark.parametrize("plan_battery", [0.0, 300.0])
+def test_hold_keeps_carrying_the_house_for_an_idle_or_small_discharge_plan(plan_battery):
+    # PR 52 review: 0 W (idle, or a stale plan zeroed) or a 300 W discharge is not a
+    # charge plan, and must not stop the batteries carrying an 800 W house.
+    assert hold_with_plan_charge(
+        "hold_below_min_price", grid_target=0.0, setpoint=800.0,
+        plan_grid_target=500.0, plan_battery=plan_battery, **_HOLD,
+    ) == (0.0, 800.0)

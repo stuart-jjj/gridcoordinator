@@ -33,6 +33,12 @@ CODE_HOLD_CHARGE_TOO_DEAR = "hold_charge_too_dear"
 CODE_HOLD_SOC_CEILING = "hold_soc_ceiling"
 CODE_CHARGE_SHORTFALL = "charge_shortfall"
 
+# Holds that keep the batteries for a spike but have no reason to stop the EMHASS plan
+# charging them.  A hold for dear buying or full batteries rules charging out.
+HOLD_CODES_PASSING_PLAN_CHARGE = frozenset(
+    {CODE_HOLD_BELOW_MIN_PRICE, CODE_HOLD_OUTRANKED, CODE_HOLD_NO_SURPLUS}
+)
+
 _FLAGGED_STATUSES = ("potential", "spike")
 _EPS_KWH = 0.001
 
@@ -111,6 +117,8 @@ class PriceWindowDecision:
     intervals: tuple[IntervalRow, ...] = ()
     shadow: bool = False
     would_command_w: float | None = None   # grid W, + = import; None when inactive
+    plan_charge_passed_w: float = 0.0      # EMHASS charge a hold lets through, W
+    plan_charge_blocked_w: float = 0.0     # EMHASS charge a hold stops (dear / full), W
 
 
 def inactive(code: str, sentence: str) -> PriceWindowDecision:
@@ -451,6 +459,8 @@ def decision_attributes(decision: PriceWindowDecision) -> dict:
         "action": decision.action,
         "shadow": decision.shadow,
         "would_command_w": decision.would_command_w,
+        "plan_charge_passed_w": decision.plan_charge_passed_w,
+        "plan_charge_blocked_w": decision.plan_charge_blocked_w,
         "window_start": stamp(decision.window_start),
         "window_end": stamp(decision.window_end),
         "reserve_horizon": stamp(decision.reserve_horizon),
@@ -513,6 +523,40 @@ def window_setpoints(
         return grid_uncontrolled - battery, battery
     battery = max(-max_charge, min(max_discharge, grid_uncontrolled - ev_power))
     return grid_uncontrolled - battery, battery
+
+
+def hold_with_plan_charge(
+    code: str,
+    *,
+    grid_target: float,
+    setpoint: float,
+    plan_grid_target: float,
+    plan_battery: float,
+    grid_uncontrolled: float,
+    import_limit: float,
+    headroom_reserve: float,
+    max_charge: float,
+) -> tuple[float, float]:
+    """Return (grid_target, battery_setpoint) for a hold, letting the plan's charge through.
+
+    A hold keeps the house off the grid, which also stopped an EMHASS plan charging
+    from the grid (ADO 333: 50 minutes flat at 34% under an interim SOC target).
+    For the codes in HOLD_CODES_PASSING_PLAN_CHARGE the batteries charge as hard as
+    the plan when it charges harder than the hold would (+ = discharge), and the grid
+    target rises to the plan's import, never past the import limit less the reserved
+    headroom and never below the hold's own target.  The charge is bounded so that
+    `grid_uncontrolled` (the house with the batteries' output added back; pass the
+    most import-heavy estimate while readings lag) stays within that limit.  Only a
+    charge plan is followed: an idle or discharging plan (or a stale one, zeroed)
+    leaves the hold carrying the house.  A setpoint equal to the plan's charge counts
+    as the plan's: tracking ticks start from what was commanded, so once the plan is
+    commanded the two agree.
+    """
+    if code not in HOLD_CODES_PASSING_PLAN_CHARGE or plan_battery >= 0 or plan_battery > setpoint:
+        return grid_target, setpoint
+    battery = max(-max_charge, plan_battery, grid_uncontrolled - (import_limit - headroom_reserve))
+    target = max(grid_target, min(plan_grid_target, import_limit - headroom_reserve))
+    return target, min(setpoint, battery)
 
 
 def split_setpoint(

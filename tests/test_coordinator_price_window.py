@@ -434,6 +434,65 @@ def test_hold_while_the_ev_charges_keeps_the_house_off_the_grid():
     assert data.mode == CoordinatorMode.PRICE_WINDOW_HOLD
 
 
+def _plan_charge(rig, battery=-6000, grid=6800, age_s=0.0):
+    """EMHASS plans to charge `battery` W (- = charge), importing `grid` W."""
+    rig.states.set(E[CONF_ENTITY_MPC_BATT_POWER], battery, age_s=age_s)
+    rig.states.set(E[CONF_ENTITY_MPC_GRID_POWER], grid, age_s=age_s)
+
+
+def test_hold_lets_the_plan_charge_the_batteries():
+    # ADO 333: a hold for a spike froze charging toward an interim SOC target.
+    rig = Rig(sell=(0.17, 10.0, 10.0), high=12.0)
+    _plan_charge(rig)
+    data = rig.tick()
+    assert data.price_window.code == "hold_below_min_price"
+    assert data.mode == CoordinatorMode.PRICE_WINDOW_HOLD
+    assert data.grid_target == 6800
+    assert data.voltx_command + data.solax_command == pytest.approx(-6000, abs=2)
+    rig.native.assert_not_awaited()
+    assert data.price_window.plan_charge_passed_w == pytest.approx(6000, abs=2)
+    assert data.price_window.plan_charge_blocked_w == 0
+
+
+def test_hold_keeps_charging_with_the_plan_once_the_meter_shows_it():
+    rig = Rig(sell=(0.17, 10.0, 10.0), high=12.0)
+    _plan_charge(rig)
+    data = rig.tick()
+    for _ in range(8):
+        rig.settle(data)
+        data = rig.tick()
+        assert data.voltx_command + data.solax_command == pytest.approx(-6000, abs=2)
+        assert data.grid_target == 6800
+
+
+def test_hold_with_a_plan_discharge_still_carries_only_the_house():
+    rig = Rig(sell=(0.17, 10.0, 10.0), high=12.0)
+    data = rig.tick()  # the rig's plan discharges 800 W
+    assert data.grid_target == 0
+    assert data.price_window.plan_charge_passed_w == 0
+
+
+def test_hold_for_dear_buying_still_blocks_the_plan_charge():
+    rig = _short_rig(options={CONF_PW_MAX_CHARGE_BUY_PRICE: "input_number.max_buy"})
+    rig.states.set("input_number.max_buy", 0.20)
+    _plan_charge(rig)
+    data = rig.tick()
+    assert data.price_window.code == "hold_charge_too_dear"
+    assert data.grid_target == 0
+    rig.native.assert_awaited()
+    assert data.price_window.plan_charge_passed_w == 0
+    assert data.price_window.plan_charge_blocked_w == 6000
+
+
+def test_hold_ignores_a_stale_plan_charge():
+    rig = Rig(sell=(0.17, 10.0, 10.0), high=12.0)
+    _plan_charge(rig, age_s=3600)
+    data = rig.tick()
+    assert data.grid_target == 0
+    assert data.price_window.plan_charge_passed_w == 0
+    assert data.price_window.plan_charge_blocked_w == 0
+
+
 # ── charge ────────────────────────────────────────────────────────────────────
 
 
@@ -665,6 +724,35 @@ def test_charge_never_passes_the_import_limit(voltx_delay, meter_lag):
     grids = _closed_loop(
         rig, [(0.17, 9.80, 10.20)] * 12, voltx_delay=voltx_delay, solax_delay=1, meter_lag=meter_lag,
     )
+    assert max(grids) <= 12000 + 20
+    assert grids[-1] == pytest.approx(12000, abs=100)
+
+
+@pytest.mark.parametrize("voltx_delay", [0, 1, 3, 4])
+@pytest.mark.parametrize("solax_delay", [0, 2])
+@pytest.mark.parametrize("meter_lag", [0, 1, 2])
+def test_hold_charges_with_the_plan_through_late_batteries_and_meters(voltx_delay, solax_delay, meter_lag):
+    # ADO 333: under late batteries and lagging readings the hold must settle on the
+    # plan's charge, not swing between it and the native handoff.
+    rig = Rig()
+    _plan_charge(rig)
+    grids = _closed_loop(
+        rig, [HOLD_PRICES] * 30, voltx_delay=voltx_delay, solax_delay=solax_delay, meter_lag=meter_lag,
+    )
+    assert rig.c._pw_decision.code == "hold_below_min_price"
+    assert max(grids) <= 12000 + 20
+    assert grids[-10:] == pytest.approx([HOUSE + 6000] * 10, abs=20)
+    assert not rig.c._sc_state.active
+
+
+@pytest.mark.parametrize("voltx_delay", [0, 1, 3])
+@pytest.mark.parametrize("meter_lag", [0, 1, 2])
+def test_hold_with_a_plan_charge_at_the_import_limit_never_passes_it(voltx_delay, meter_lag):
+    # PR 52 review: a plan that charges 12 kW with an 800 W house would import 12.8 kW.
+    rig = Rig()
+    _plan_charge(rig, battery=-12000, grid=12800)
+    # The import-heavy estimate dips the charge while readings lag; it settles in ~30 ticks.
+    grids = _closed_loop(rig, [HOLD_PRICES] * 40, voltx_delay=voltx_delay, solax_delay=1, meter_lag=meter_lag)
     assert max(grids) <= 12000 + 20
     assert grids[-1] == pytest.approx(12000, abs=100)
 
